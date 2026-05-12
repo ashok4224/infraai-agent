@@ -49,7 +49,7 @@ jobs:
         id: login-ecr
 
       - name: Build and push Backend image
-        if: contains(fromJSON('["backend","all"]'), inputs.component || 'all')
+        if: ${{ github.event_name == 'push' || contains(fromJSON('["backend","all"]'), inputs.component) }}
         run: |
           docker build \
             -t $ECR_REGISTRY/infraai/backend:latest \
@@ -60,7 +60,7 @@ jobs:
           docker push $ECR_REGISTRY/infraai/backend:${{ github.sha }}
 
       - name: Build and push Frontend image
-        if: contains(fromJSON('["frontend","all"]'), inputs.component || 'all')
+        if: ${{ github.event_name == 'push' || contains(fromJSON('["frontend","all"]'), inputs.component) }}
         run: |
           docker build \
             -t $ECR_REGISTRY/infraai/frontend:latest \
