@@ -1,0 +1,31 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: infraai
+
+resources:
+  - ../../base
+
+patches:
+  # AKS-specific ingress with NGINX + cert-manager annotations
+  - path: ingress-patch.yaml
+  # AKS managed-csi storage class for PostgreSQL PVC
+  - path: postgres-patch.yaml
+
+images:
+  - name: REGISTRY/infraai/backend
+    newName: infraaiacr.azurecr.io/infraai/backend   # Change to your ACR
+    newTag: latest
+  - name: REGISTRY/infraai/frontend
+    newName: infraaiacr.azurecr.io/infraai/frontend   # Change to your ACR
+    newTag: latest
+
+# Override secrets for Azure Database for PostgreSQL (recommended)
+# Uncomment and fill in real values:
+# secretGenerator:
+#   - name: infraai-secrets
+#     behavior: replace
+#     literals:
+#       - DATABASE_URL=postgresql+asyncpg://pgadmin:PASSWORD@infraai-pg.postgres.database.azure.com:5432/infraaiagent?ssl=require
+#       - SECRET_KEY=your-64-char-random-string
+#       - ADMIN_PASSWORD=YourSecureAdminPassword

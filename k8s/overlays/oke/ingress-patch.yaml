@@ -1,0 +1,36 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: infraai-ingress
+  namespace: infraai
+  annotations:
+    # OCI Native Ingress Controller annotations
+    oci-native-ingress.oraclecloud.com/load-balancer-shape: flexible
+    oci-native-ingress.oraclecloud.com/load-balancer-shape-flex-min: "10"
+    oci-native-ingress.oraclecloud.com/load-balancer-shape-flex-max: "100"
+    oci-native-ingress.oraclecloud.com/backend-tls-enabled: "false"
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: native
+  tls:
+    - hosts:
+        - infraai.yourdomain.com          # Change to your domain
+      secretName: infraai-tls
+  rules:
+    - host: infraai.yourdomain.com        # Change to your domain
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: infraai-backend
+                port:
+                  number: 8000
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: infraai-frontend
+                port:
+                  number: 80

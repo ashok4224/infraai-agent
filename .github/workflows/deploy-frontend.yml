@@ -1,0 +1,115 @@
+name: Deploy Frontend to Azure App Service
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'frontend/**'
+      - '.github/workflows/deploy-frontend.yml'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        type: choice
+        options:
+          - production
+          - staging
+        default: 'production'
+      resource_group:
+        description: 'Azure Resource Group'
+        required: false
+        default: 'infraai-rgp'
+      app_name:
+        description: 'Frontend App Service name'
+        required: false
+        default: 'infraai-frontend'
+      backend_app_name:
+        description: 'Backend App Service name'
+        required: false
+        default: 'infraai-backend'
+      acr_name:
+        description: 'Azure Container Registry name'
+        required: false
+        default: 'infraaiacr'
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  RG: ${{ inputs.resource_group || 'infraai-rgp' }}
+  AZURE_WEBAPP_NAME: ${{ inputs.app_name || 'infraai-frontend' }}
+  BACKEND_APP_NAME: ${{ inputs.backend_app_name || 'infraai-backend' }}
+  ACR: ${{ inputs.acr_name || 'infraaiacr' }}
+  ACR_LOGIN_SERVER: ${{ format('{0}.azurecr.io', inputs.acr_name || 'infraaiacr') }}
+  IMAGE_NAME: infraai/frontend
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment || 'production' }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Log in to Azure
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Build and push image via ACR Tasks
+        run: |
+          az acr build \
+            --registry $ACR \
+            --resource-group $RG \
+            --image $IMAGE_NAME:${{ github.sha }} \
+            --image $IMAGE_NAME:latest \
+            --file frontend/Dockerfile.prod \
+            --build-arg VITE_API_BASE_URL=/api \
+            frontend/
+
+      - name: Configure App Service container
+        run: |
+          az webapp config set --resource-group $RG --name $AZURE_WEBAPP_NAME \
+            --generic-configurations '{"acrUseManagedIdentityCreds": true}'
+
+          az webapp config container set \
+            --resource-group $RG --name $AZURE_WEBAPP_NAME \
+            --container-image-name $ACR_LOGIN_SERVER/$IMAGE_NAME:${{ github.sha }} \
+            --container-registry-url https://$ACR_LOGIN_SERVER
+
+      - name: Deploy to Azure App Service
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: ${{ env.AZURE_WEBAPP_NAME }}
+          images: ${{ env.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+
+      - name: Update app settings
+        run: |
+          az webapp config appsettings set \
+            --resource-group $RG --name $AZURE_WEBAPP_NAME \
+            --settings \
+              BACKEND_URL="https://${BACKEND_APP_NAME}.azurewebsites.net" \
+              WEBSITES_PORT="80" \
+              WEBSITE_VNET_ROUTE_ALL=1
+
+      - name: Restart and verify
+        run: |
+          az webapp restart --resource-group $RG --name $AZURE_WEBAPP_NAME
+          echo "Waiting 40s for frontend to start..."
+          sleep 40
+          for i in 1 2 3; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+              "https://${AZURE_WEBAPP_NAME}.azurewebsites.net/" || echo "000")
+            echo "Attempt $i: HTTP $STATUS"
+            if [ "$STATUS" = "200" ]; then
+              echo "✅ Frontend healthy"
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "⚠️  Frontend not responding — check logs:"
+          echo "    az webapp log tail -g $RG -n $AZURE_WEBAPP_NAME"
+          exit 1

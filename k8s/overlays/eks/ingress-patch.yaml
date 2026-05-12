@@ -1,0 +1,28 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: infraai-ingress
+  namespace: infraai
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+    nginx.ingress.kubernetes.io/use-regex: "true"
+spec:
+  rules:
+    - host: infraai-dev.yourdomain.com
+      http:
+        paths:
+          - path: /api(/|$)(.*)
+            pathType: Prefix
+            backend:
+              service:
+                name: infraai-backend
+                port:
+                  number: 8000
+          - path: /()(.*)
+            pathType: Prefix
+            backend:
+              service:
+                name: infraai-frontend
+                port:
+                  number: 80

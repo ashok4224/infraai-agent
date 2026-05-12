@@ -1,0 +1,33 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: infraai-backend
+  namespace: infraai
+spec:
+  replicas: 2
+  template:
+    spec:
+      containers:
+        - name: backend
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: infraai-secrets
+                  key: DATABASE_URL
+            - name: SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: infraai-secrets
+                  key: SECRET_KEY
+            - name: ADMIN_EMAIL
+              value: "admin@winfosolutions.com"
+            - name: ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: infraai-secrets
+                  key: ADMIN_PASSWORD
+            - name: APP_ENV
+              value: "dev"
+            - name: CORS_ORIGINS
+              value: "*"

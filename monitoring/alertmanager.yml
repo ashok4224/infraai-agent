@@ -1,0 +1,30 @@
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: "infraai-agent"
+  group_by: ["alertname", "instance"]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    - match:
+        severity: critical
+      receiver: "infraai-agent"
+      group_wait: 10s
+      repeat_interval: 1h
+
+receivers:
+  - name: "infraai-agent"
+    webhook_configs:
+      # Change this URL to your InfraAI backend address
+      - url: "http://host.docker.internal:8000/api/alerts/webhook"
+        send_resolved: true
+        max_alerts: 20
+
+inhibit_rules:
+  - source_match:
+      severity: "critical"
+    target_match:
+      severity: "warning"
+    equal: ["alertname", "instance"]

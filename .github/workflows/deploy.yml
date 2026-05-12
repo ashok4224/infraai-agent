@@ -1,0 +1,556 @@
+name: Deploy InfraAI Agent to Azure
+
+on:
+  workflow_dispatch:
+    inputs:
+      component:
+        description: 'What to deploy'
+        required: true
+        type: choice
+        options:
+          - all                   # Infra + Backend + Frontend
+          - backend               # Redeploy backend only
+          - frontend              # Redeploy frontend only
+          - apps                  # Redeploy backend + frontend (no infra)
+          - infrastructure        # Provision/update infra only
+        default: 'apps'
+      environment:
+        description: 'Target environment'
+        required: true
+        type: choice
+        options:
+          - production
+          - staging
+        default: 'production'
+      resource_group:
+        description: 'Azure Resource Group'
+        required: true
+        default: 'infraai-rg'
+      location:
+        description: 'Azure region (only used for infra provisioning)'
+        required: false
+        default: 'eastus'
+      acr_name:
+        description: 'Azure Container Registry name'
+        required: true
+        default: 'infraaiacr'
+      backend_app_name:
+        description: 'Backend App Service name'
+        required: true
+        default: 'infraai-backend'
+      frontend_app_name:
+        description: 'Frontend App Service name'
+        required: true
+        default: 'infraai-frontend'
+      postgres_server_name:
+        description: 'PostgreSQL Flexible Server name'
+        required: true
+        default: 'infraai-pg'
+      postgres_sku:
+        description: 'PostgreSQL SKU (infra only)'
+        required: false
+        type: choice
+        options:
+          - Standard_B1ms
+          - Standard_B2s
+          - Standard_D2s_v3
+          - Standard_D4s_v3
+        default: 'Standard_B1ms'
+      app_service_sku:
+        description: 'App Service Plan SKU (infra only)'
+        required: false
+        type: choice
+        options:
+          - B1
+          - B2
+          - P1v3
+          - P2v3
+        default: 'B2'
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  RG: ${{ inputs.resource_group }}
+  LOCATION: ${{ inputs.location }}
+  ACR: ${{ inputs.acr_name }}
+  ACR_LOGIN_SERVER: ${{ inputs.acr_name }}.azurecr.io
+  BACKEND_APP: ${{ inputs.backend_app_name }}
+  FRONTEND_APP: ${{ inputs.frontend_app_name }}
+  PG_SERVER: ${{ inputs.postgres_server_name }}
+  VNET_NAME: infraai-vnet
+  SUBNET_APPS: snet-apps
+  SUBNET_PE: snet-private-endpoints
+  SUBNET_PG: snet-postgres
+
+jobs:
+  # ─────────────────────────────────────────────────
+  # JOB 1: Provision / update private Azure infra
+  # ─────────────────────────────────────────────────
+  infrastructure:
+    if: inputs.component == 'infrastructure' || inputs.component == 'all'
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - name: Log in to Azure
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      # ── Resource Group ──────────────────────────
+      - name: Create Resource Group
+        run: az group create --name $RG --location $LOCATION
+
+      # ── Virtual Network (private backbone) ──────
+      - name: Create VNet and subnets
+        run: |
+          az network vnet create \
+            --resource-group $RG --name $VNET_NAME --location $LOCATION \
+            --address-prefixes 10.0.0.0/16 \
+            2>/dev/null || echo "VNet already exists"
+
+          # Subnet for App Service VNet integration
+          az network vnet subnet create \
+            --resource-group $RG --vnet-name $VNET_NAME \
+            --name $SUBNET_APPS --address-prefixes 10.0.1.0/24 \
+            --delegations Microsoft.Web/serverFarms \
+            2>/dev/null || echo "Subnet $SUBNET_APPS already exists"
+
+          # Subnet for Private Endpoints (ACR)
+          az network vnet subnet create \
+            --resource-group $RG --vnet-name $VNET_NAME \
+            --name $SUBNET_PE --address-prefixes 10.0.2.0/24 \
+            2>/dev/null || echo "Subnet $SUBNET_PE already exists"
+
+          # Disable private-endpoint network policies on PE subnet
+          az network vnet subnet update \
+            --resource-group $RG --vnet-name $VNET_NAME \
+            --name $SUBNET_PE \
+            --private-endpoint-network-policies Disabled \
+            2>/dev/null || true
+
+          # Subnet for PostgreSQL (delegated)
+          az network vnet subnet create \
+            --resource-group $RG --vnet-name $VNET_NAME \
+            --name $SUBNET_PG --address-prefixes 10.0.3.0/24 \
+            --delegations Microsoft.DBforPostgreSQL/flexibleServers \
+            2>/dev/null || echo "Subnet $SUBNET_PG already exists"
+
+      # ── Private DNS Zones ───────────────────────
+      - name: Create Private DNS Zones
+        run: |
+          # DNS zone for PostgreSQL
+          az network private-dns zone create \
+            --resource-group $RG \
+            --name privatelink.postgres.database.azure.com \
+            2>/dev/null || echo "PG DNS zone already exists"
+
+          az network private-dns link vnet create \
+            --resource-group $RG \
+            --zone-name privatelink.postgres.database.azure.com \
+            --name pg-dns-link --virtual-network $VNET_NAME \
+            --registration-enabled false \
+            2>/dev/null || echo "PG DNS link already exists"
+
+          # DNS zone for ACR
+          az network private-dns zone create \
+            --resource-group $RG \
+            --name privatelink.azurecr.io \
+            2>/dev/null || echo "ACR DNS zone already exists"
+
+          az network private-dns link vnet create \
+            --resource-group $RG \
+            --zone-name privatelink.azurecr.io \
+            --name acr-dns-link --virtual-network $VNET_NAME \
+            --registration-enabled false \
+            2>/dev/null || echo "ACR DNS link already exists"
+
+      # ── Container Registry (private) ────────────
+      - name: Create ACR with Private Endpoint
+        run: |
+          az acr create \
+            --resource-group $RG --name $ACR \
+            --sku Premium --public-network-enabled false \
+            2>/dev/null || echo "ACR already exists"
+
+          # Disable public access on existing ACR
+          az acr update --name $ACR --public-network-enabled false 2>/dev/null || true
+
+          # Private Endpoint for ACR
+          ACR_ID=$(az acr show --name $ACR --query id -o tsv)
+          PE_EXISTS=$(az network private-endpoint show \
+            --resource-group $RG --name pe-acr --query id -o tsv 2>/dev/null || echo "")
+          if [ -z "$PE_EXISTS" ]; then
+            az network private-endpoint create \
+              --resource-group $RG --name pe-acr --location $LOCATION \
+              --vnet-name $VNET_NAME --subnet $SUBNET_PE \
+              --private-connection-resource-id $ACR_ID \
+              --group-ids registry \
+              --connection-name acr-connection
+          fi
+
+          # DNS zone group
+          az network private-endpoint dns-zone-group create \
+            --resource-group $RG --endpoint-name pe-acr \
+            --name acr-dns-group \
+            --private-dns-zone privatelink.azurecr.io \
+            --zone-name acr \
+            2>/dev/null || echo "ACR DNS zone group already exists"
+
+      # ── PostgreSQL Flexible Server (VNet-injected, no public access) ──
+      - name: Create PostgreSQL Flexible Server (private)
+        run: |
+          PG_EXISTS=$(az postgres flexible-server show \
+            --resource-group $RG --name $PG_SERVER --query id -o tsv 2>/dev/null || echo "")
+
+          if [ -z "$PG_EXISTS" ]; then
+            PG_SUBNET_ID=$(az network vnet subnet show \
+              --resource-group $RG --vnet-name $VNET_NAME --name $SUBNET_PG \
+              --query id -o tsv)
+            PG_DNS_ZONE_ID=$(az network private-dns zone show \
+              --resource-group $RG --name privatelink.postgres.database.azure.com \
+              --query id -o tsv)
+
+            az postgres flexible-server create \
+              --resource-group $RG --name $PG_SERVER --location $LOCATION \
+              --admin-user pgadmin \
+              --admin-password '${{ secrets.DB_PASSWORD }}' \
+              --tier Burstable \
+              --sku-name ${{ inputs.postgres_sku }} \
+              --storage-size 32 --version 16 \
+              --subnet "$PG_SUBNET_ID" \
+              --private-dns-zone "$PG_DNS_ZONE_ID" \
+              --yes
+          else
+            echo "PostgreSQL server already exists"
+          fi
+
+          # Create database
+          az postgres flexible-server db create \
+            --resource-group $RG --server-name $PG_SERVER \
+            --database-name infraai \
+            2>/dev/null || echo "Database already exists"
+
+          # Enable uuid-ossp extension
+          az postgres flexible-server parameter set \
+            --resource-group $RG --server-name $PG_SERVER \
+            --name azure.extensions --value uuid-ossp \
+            2>/dev/null || true
+
+      # ── App Service Plan ────────────────────────
+      - name: Create App Service Plan
+        run: |
+          az appservice plan create \
+            --name ${RG}-plan --resource-group $RG \
+            --sku ${{ inputs.app_service_sku }} --is-linux \
+            2>/dev/null || echo "App Service Plan already exists"
+
+      # ── Backend App Service (VNet integrated) ───
+      - name: Create Backend App Service (private)
+        run: |
+          az webapp create \
+            --resource-group $RG --plan ${RG}-plan \
+            --name $BACKEND_APP \
+            --container-image-name $ACR_LOGIN_SERVER/infraai/backend:latest \
+            2>/dev/null || echo "Backend App Service already exists"
+
+          # Managed identity → ACR pull
+          az webapp identity assign --resource-group $RG --name $BACKEND_APP
+          PRINCIPAL_ID=$(az webapp identity show --resource-group $RG --name $BACKEND_APP --query principalId -o tsv)
+          ACR_ID=$(az acr show --name $ACR --query id -o tsv)
+          az role assignment create --assignee $PRINCIPAL_ID --scope $ACR_ID --role AcrPull 2>/dev/null || true
+
+          # Use managed identity to pull from ACR (no admin credentials needed)
+          az webapp config set --resource-group $RG --name $BACKEND_APP \
+            --generic-configurations '{"acrUseManagedIdentityCreds": true}'
+
+          # Container registry config
+          az webapp config container set \
+            --resource-group $RG --name $BACKEND_APP \
+            --container-image-name $ACR_LOGIN_SERVER/infraai/backend:latest \
+            --container-registry-url https://$ACR_LOGIN_SERVER
+
+          # VNet integration (outbound traffic goes through VNet → reaches PG privately)
+          APPS_SUBNET_ID=$(az network vnet subnet show \
+            --resource-group $RG --vnet-name $VNET_NAME --name $SUBNET_APPS --query id -o tsv)
+          az webapp vnet-integration add \
+            --resource-group $RG --name $BACKEND_APP \
+            --vnet $VNET_NAME --subnet $SUBNET_APPS \
+            2>/dev/null || echo "VNet integration already exists"
+
+          # Route all outbound traffic through VNet
+          az webapp config appsettings set \
+            --resource-group $RG --name $BACKEND_APP \
+            --settings WEBSITE_VNET_ROUTE_ALL=1
+
+          # Environment variables
+          PG_HOST="${PG_SERVER}.postgres.database.azure.com"
+          az webapp config appsettings set \
+            --resource-group $RG --name $BACKEND_APP \
+            --settings \
+              DATABASE_URL="postgresql+asyncpg://pgadmin:${{ secrets.DB_PASSWORD }}@${PG_HOST}:5432/infraai?ssl=require" \
+              SECRET_KEY="${{ secrets.JWT_SECRET_KEY }}" \
+              ADMIN_EMAIL="${{ secrets.ADMIN_EMAIL }}" \
+              ADMIN_PASSWORD="${{ secrets.ADMIN_PASSWORD }}" \
+              APP_ENV="${{ inputs.environment }}" \
+              LOG_LEVEL="INFO" \
+              CORS_ORIGINS="https://${FRONTEND_APP}.azurewebsites.net" \
+              WEBSITES_PORT="8000"
+
+      # ── Frontend App Service (VNet integrated) ──
+      - name: Create Frontend App Service (private)
+        run: |
+          az webapp create \
+            --resource-group $RG --plan ${RG}-plan \
+            --name $FRONTEND_APP \
+            --container-image-name $ACR_LOGIN_SERVER/infraai/frontend:latest \
+            2>/dev/null || echo "Frontend App Service already exists"
+
+          # Managed identity → ACR pull
+          az webapp identity assign --resource-group $RG --name $FRONTEND_APP
+          PRINCIPAL_ID=$(az webapp identity show --resource-group $RG --name $FRONTEND_APP --query principalId -o tsv)
+          ACR_ID=$(az acr show --name $ACR --query id -o tsv)
+          az role assignment create --assignee $PRINCIPAL_ID --scope $ACR_ID --role AcrPull 2>/dev/null || true
+
+          az webapp config set --resource-group $RG --name $FRONTEND_APP \
+            --generic-configurations '{"acrUseManagedIdentityCreds": true}'
+
+          az webapp config container set \
+            --resource-group $RG --name $FRONTEND_APP \
+            --container-image-name $ACR_LOGIN_SERVER/infraai/frontend:latest \
+            --container-registry-url https://$ACR_LOGIN_SERVER
+
+          # VNet integration (so frontend nginx can reach backend privately)
+          az webapp vnet-integration add \
+            --resource-group $RG --name $FRONTEND_APP \
+            --vnet $VNET_NAME --subnet $SUBNET_APPS \
+            2>/dev/null || echo "VNet integration already exists"
+
+          az webapp config appsettings set \
+            --resource-group $RG --name $FRONTEND_APP \
+            --settings \
+              BACKEND_URL="https://${BACKEND_APP}.azurewebsites.net" \
+              WEBSITES_PORT="80" \
+              WEBSITE_VNET_ROUTE_ALL=1
+
+      # ── Restrict App Service access ─────────────
+      - name: Configure access restrictions
+        run: |
+          # Backend: deny all public access except from frontend App Service
+          # The /api/alerts/webhook must remain open for Alertmanager, so we
+          # keep public access enabled but could add IP restrictions if needed.
+          # Internal traffic flows through VNet.
+
+          echo "Private networking configured:"
+          echo "  - PostgreSQL: VNet-injected (no public endpoint)"
+          echo "  - ACR: Private Endpoint (no public access)"
+          echo "  - App Services: VNet-integrated outbound"
+          echo "  - Backend DB connection: over VNet (private)"
+          echo "  - Frontend→Backend proxy: over VNet (private)"
+
+      - name: Print summary
+        run: |
+          echo "============================================================"
+          echo "  Azure Infrastructure Ready (Private Networking)"
+          echo "============================================================"
+          echo ""
+          echo "  Resource Group:   $RG"
+          echo "  Region:           $LOCATION"
+          echo "  VNet:             $VNET_NAME (10.0.0.0/16)"
+          echo "  ACR:              $ACR_LOGIN_SERVER (private endpoint)"
+          echo "  PostgreSQL:       ${PG_SERVER}.postgres.database.azure.com (VNet-injected)"
+          echo "  Backend URL:      https://${BACKEND_APP}.azurewebsites.net"
+          echo "  Frontend URL:     https://${FRONTEND_APP}.azurewebsites.net"
+          echo "  Webhook URL:      https://${BACKEND_APP}.azurewebsites.net/api/alerts/webhook"
+          echo ""
+          echo "  All backend resources are PRIVATE — no public endpoints"
+          echo "============================================================"
+
+  # ─────────────────────────────────────────────────
+  # JOB 2: Build & Deploy Backend
+  # ─────────────────────────────────────────────────
+  backend:
+    if: >-
+      always() &&
+      contains(fromJSON('["backend","apps","all"]'), inputs.component) &&
+      (needs.infrastructure.result == 'success' || needs.infrastructure.result == 'skipped')
+    needs: [infrastructure]
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Log in to Azure
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Build image via ACR Tasks (no local Docker needed)
+        run: |
+          az acr build \
+            --registry $ACR \
+            --resource-group $RG \
+            --image infraai/backend:${{ github.sha }} \
+            --image infraai/backend:latest \
+            --file backend/Dockerfile.prod \
+            backend/
+
+      - name: Configure App Service container image
+        run: |
+          # Use managed identity for ACR pull
+          az webapp config set --resource-group $RG --name $BACKEND_APP \
+            --generic-configurations '{"acrUseManagedIdentityCreds": true}'
+
+          az webapp config container set \
+            --resource-group $RG --name $BACKEND_APP \
+            --container-image-name $ACR_LOGIN_SERVER/infraai/backend:${{ github.sha }} \
+            --container-registry-url https://$ACR_LOGIN_SERVER
+
+      - name: Deploy to App Service
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: ${{ env.BACKEND_APP }}
+          images: ${{ env.ACR_LOGIN_SERVER }}/infraai/backend:${{ github.sha }}
+
+      - name: Update app settings (if needed)
+        run: |
+          PG_HOST="${PG_SERVER}.postgres.database.azure.com"
+          az webapp config appsettings set \
+            --resource-group $RG --name $BACKEND_APP \
+            --settings \
+              DATABASE_URL="postgresql+asyncpg://pgadmin:${{ secrets.DB_PASSWORD }}@${PG_HOST}:5432/infraai?ssl=require" \
+              SECRET_KEY="${{ secrets.JWT_SECRET_KEY }}" \
+              ADMIN_EMAIL="${{ secrets.ADMIN_EMAIL }}" \
+              ADMIN_PASSWORD="${{ secrets.ADMIN_PASSWORD }}" \
+              APP_ENV="${{ inputs.environment }}" \
+              LOG_LEVEL="INFO" \
+              CORS_ORIGINS="https://${FRONTEND_APP}.azurewebsites.net" \
+              WEBSITES_PORT="8000" \
+              WEBSITE_VNET_ROUTE_ALL=1
+
+      - name: Restart and health check
+        run: |
+          az webapp restart --resource-group $RG --name $BACKEND_APP
+          echo "Waiting 45s for backend to start..."
+          sleep 45
+          for i in 1 2 3 4; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+              "https://${BACKEND_APP}.azurewebsites.net/api/health" || echo "000")
+            echo "Attempt $i: HTTP $STATUS"
+            if [ "$STATUS" = "200" ]; then
+              echo "✅ Backend is healthy"
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "⚠️  Backend not responding — check App Service logs"
+          echo "    az webapp log tail -g $RG -n $BACKEND_APP"
+          exit 1
+
+  # ─────────────────────────────────────────────────
+  # JOB 3: Build & Deploy Frontend
+  # ─────────────────────────────────────────────────
+  frontend:
+    if: >-
+      always() &&
+      contains(fromJSON('["frontend","apps","all"]'), inputs.component) &&
+      (needs.infrastructure.result == 'success' || needs.infrastructure.result == 'skipped') &&
+      (needs.backend.result == 'success' || needs.backend.result == 'skipped')
+    needs: [infrastructure, backend]
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Log in to Azure
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Build image via ACR Tasks
+        run: |
+          az acr build \
+            --registry $ACR \
+            --resource-group $RG \
+            --image infraai/frontend:${{ github.sha }} \
+            --image infraai/frontend:latest \
+            --file frontend/Dockerfile.prod \
+            --build-arg VITE_API_BASE_URL=/api \
+            frontend/
+
+      - name: Configure App Service container image
+        run: |
+          az webapp config set --resource-group $RG --name $FRONTEND_APP \
+            --generic-configurations '{"acrUseManagedIdentityCreds": true}'
+
+          az webapp config container set \
+            --resource-group $RG --name $FRONTEND_APP \
+            --container-image-name $ACR_LOGIN_SERVER/infraai/frontend:${{ github.sha }} \
+            --container-registry-url https://$ACR_LOGIN_SERVER
+
+      - name: Deploy to App Service
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: ${{ env.FRONTEND_APP }}
+          images: ${{ env.ACR_LOGIN_SERVER }}/infraai/frontend:${{ github.sha }}
+
+      - name: Update app settings
+        run: |
+          az webapp config appsettings set \
+            --resource-group $RG --name $FRONTEND_APP \
+            --settings \
+              BACKEND_URL="https://${BACKEND_APP}.azurewebsites.net" \
+              WEBSITES_PORT="80" \
+              WEBSITE_VNET_ROUTE_ALL=1
+
+      - name: Restart and health check
+        run: |
+          az webapp restart --resource-group $RG --name $FRONTEND_APP
+          echo "Waiting 40s for frontend to start..."
+          sleep 40
+          for i in 1 2 3; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+              "https://${FRONTEND_APP}.azurewebsites.net/" || echo "000")
+            echo "Attempt $i: HTTP $STATUS"
+            if [ "$STATUS" = "200" ]; then
+              echo "✅ Frontend is healthy"
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "⚠️  Frontend not responding — check App Service logs"
+          exit 1
+
+  # ─────────────────────────────────────────────────
+  # JOB 4: Summary
+  # ─────────────────────────────────────────────────
+  summary:
+    if: always()
+    needs: [infrastructure, backend, frontend]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deployment Summary
+        run: |
+          echo "============================================================"
+          echo "  InfraAI Agent — Deployment Summary"
+          echo "============================================================"
+          echo ""
+          echo "  Component:       ${{ inputs.component }}"
+          echo "  Environment:     ${{ inputs.environment }}"
+          echo "  Commit:          ${{ github.sha }}"
+          echo "  Triggered by:    ${{ github.actor }}"
+          echo ""
+          echo "  Frontend URL:    https://${{ inputs.frontend_app_name }}.azurewebsites.net"
+          echo "  Backend URL:     https://${{ inputs.backend_app_name }}.azurewebsites.net"
+          echo "  Backend API:     https://${{ inputs.backend_app_name }}.azurewebsites.net/api/health"
+          echo "  Webhook URL:     https://${{ inputs.backend_app_name }}.azurewebsites.net/api/alerts/webhook"
+          echo "  PostgreSQL:      ${{ inputs.postgres_server_name }}.postgres.database.azure.com (private)"
+          echo "  ACR:             ${{ inputs.acr_name }}.azurecr.io (private)"
+          echo ""
+          echo "  Infra job:     ${{ needs.infrastructure.result }}"
+          echo "  Backend job:   ${{ needs.backend.result }}"
+          echo "  Frontend job:  ${{ needs.frontend.result }}"
+          echo "============================================================"

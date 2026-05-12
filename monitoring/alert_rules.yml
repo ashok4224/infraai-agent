@@ -1,0 +1,114 @@
+groups:
+  - name: host.rules
+    rules:
+      - alert: HighCPU
+        expr: 100 - (avg by(instance) (irate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High CPU usage on {{ $labels.instance }}"
+          description: "CPU usage is {{ $value | printf \"%.1f\" }}% for 5 minutes."
+
+      - alert: CriticalCPU
+        expr: 100 - (avg by(instance) (irate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 95
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Critical CPU on {{ $labels.instance }}"
+          description: "CPU usage is {{ $value | printf \"%.1f\" }}% for 2 minutes."
+
+      - alert: HighMemory
+        expr: (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100 > 85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High memory usage on {{ $labels.instance }}"
+          description: "Memory usage is {{ $value | printf \"%.1f\" }}%."
+
+      - alert: DiskSpaceLow
+        expr: (1 - node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes) * 100 > 85
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Disk space low on {{ $labels.instance }}:{{ $labels.mountpoint }}"
+          description: "Disk usage is {{ $value | printf \"%.1f\" }}%."
+
+      - alert: DiskSpaceCritical
+        expr: (1 - node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes) * 100 > 95
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Disk almost full on {{ $labels.instance }}:{{ $labels.mountpoint }}"
+          description: "Disk usage is {{ $value | printf \"%.1f\" }}%. Risk of service failure."
+
+      - alert: HostDown
+        expr: up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Host {{ $labels.instance }} is down"
+          description: "Target unreachable for over 2 minutes."
+
+  - name: oracle.rules
+    rules:
+      - alert: OracleTablespaceFull
+        expr: oracledb_tablespace_used_percent > 90
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Tablespace {{ $labels.tablespace }} is {{ $value | printf \"%.1f\" }}% full"
+          description: "Tablespace {{ $labels.tablespace }} on {{ $labels.instance }} is running out of space."
+
+      - alert: HighDatabaseConnections
+        expr: oracledb_sessions_active > 200
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High active sessions on {{ $labels.instance }}"
+          description: "{{ $value }} active database sessions."
+
+      - alert: OracleInstanceDown
+        expr: oracledb_up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Oracle DB {{ $labels.instance }} is down"
+          description: "Oracle database instance is not responding."
+
+      - alert: LongRunningQuery
+        expr: oracledb_sql_elapsed_seconds > 300
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Long-running SQL on {{ $labels.instance }}"
+          description: "SQL_ID {{ $labels.sql_id }} running for {{ $value | printf \"%.0f\" }}s."
+
+  - name: app.rules
+    rules:
+      - alert: HighErrorRate
+        expr: rate(http_requests_total{status=~"5.."}[5m]) / rate(http_requests_total[5m]) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High error rate on {{ $labels.instance }}"
+          description: "{{ $value | printf \"%.1f\" }}% of requests returning 5xx."
+
+      - alert: HighLatency
+        expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m])) > 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High p95 latency on {{ $labels.instance }}"
+          description: "95th percentile response time is {{ $value | printf \"%.2f\" }}s."

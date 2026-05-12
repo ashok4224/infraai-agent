@@ -1,0 +1,15 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: infraai
+spec:
+  volumeClaimTemplates:
+    - metadata:
+        name: pgdata
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: oci-bv              # OCI Block Volume storage class
+        resources:
+          requests:
+            storage: 50Gi                     # OCI BV minimum is 50Gi

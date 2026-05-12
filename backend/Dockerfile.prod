@@ -1,0 +1,35 @@
+FROM python:3.12-slim
+
+# Install system deps + JDK for SQLcl MCP
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl unzip default-jre-headless && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install Oracle SQLcl (latest — has native MCP support)
+RUN curl -fSL "https://download.oracle.com/otn_software/java/sqldeveloper/sqlcl-latest.zip" \
+      -o /tmp/sqlcl.zip && \
+    unzip -q /tmp/sqlcl.zip -d /opt && \
+    rm /tmp/sqlcl.zip && \
+    chmod +x /opt/sqlcl/bin/sql
+ENV PATH="/opt/sqlcl/bin:${PATH}"
+ENV SQLCL_HOME="/opt/sqlcl"
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+# Make entrypoint executable
+RUN chmod +x entrypoint.sh
+
+# Run as non-root user
+RUN useradd --create-home appuser
+USER appuser
+
+# Azure App Service expects port 8000
+EXPOSE 8000
+
+# Entrypoint runs migrations then starts uvicorn
+CMD ["./entrypoint.sh"]

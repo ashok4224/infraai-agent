@@ -1,0 +1,25 @@
+# Base Ingress — cloud-specific annotations are applied via overlay patches
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: infraai-ingress
+  namespace: infraai
+spec:
+  rules:
+    - host: infraai.yourdomain.com
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: infraai-backend
+                port:
+                  number: 8000
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: infraai-frontend
+                port:
+                  number: 80

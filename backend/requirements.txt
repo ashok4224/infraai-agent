@@ -1,0 +1,35 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.0
+sqlalchemy[asyncio]==2.0.35
+asyncpg==0.30.0
+alembic==1.13.0
+pydantic==2.9.0
+pydantic-settings==2.5.0
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+bcrypt==4.0.1
+python-multipart==0.0.12
+httpx==0.27.0
+python-dotenv==1.0.1
+openai>=1.75.0
+anthropic==0.34.0
+google-generativeai==0.8.0
+aiosmtplib==3.0.1
+email-validator==2.2.0
+jinja2==3.1.4
+oracledb==2.5.1
+asyncssh>=2.14.0
+# Azure AI Foundry (optional — only needed for azure_foundry mode)
+azure-ai-projects>=2.0.0
+azure-identity>=1.18.0
+azure-keyvault-secrets>=4.7.0
+msgraph-sdk>=1.15.0
+azure-search-documents>=11.6.0
+# SAML SSO (optional — only needed for SAML identity providers)
+pysaml2>=7.5.0
+# RAG / Knowledge Base (optional — only needed when RAG is enabled)
+pgvector>=0.3.0
+tiktoken>=0.7.0
+PyGithub>=2.0.0
+gitpython>=3.1.0
+apscheduler>=3.10.0

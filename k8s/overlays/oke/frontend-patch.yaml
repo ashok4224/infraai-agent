@@ -1,0 +1,10 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: infraai-frontend
+  namespace: infraai
+spec:
+  template:
+    spec:
+      imagePullSecrets:
+        - name: ocir-secret

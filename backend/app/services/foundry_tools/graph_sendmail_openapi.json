@@ -1,0 +1,152 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Microsoft Graph - Send Mail",
+    "description": "Minimal OpenAPI spec for the Microsoft Graph sendMail endpoint, used by Azure AI Foundry agents to send email notifications via Outlook.",
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "https://graph.microsoft.com/v1.0"
+    }
+  ],
+  "paths": {
+    "/users/{sender}/sendMail": {
+      "post": {
+        "operationId": "sendMail",
+        "summary": "Send an email via Microsoft Graph / Outlook",
+        "description": "Sends an email message from the specified user mailbox. Requires Mail.Send application permission.",
+        "parameters": [
+          {
+            "name": "sender",
+            "in": "path",
+            "required": true,
+            "description": "The UPN or email address of the sending user.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SendMailRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Email accepted for delivery"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Authentication failed"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "SendMailRequest": {
+        "type": "object",
+        "required": ["message"],
+        "properties": {
+          "message": {
+            "$ref": "#/components/schemas/Message"
+          },
+          "saveToSentItems": {
+            "type": "boolean",
+            "default": true
+          }
+        }
+      },
+      "Message": {
+        "type": "object",
+        "required": ["subject", "body", "toRecipients"],
+        "properties": {
+          "subject": {
+            "type": "string",
+            "description": "The email subject line"
+          },
+          "body": {
+            "$ref": "#/components/schemas/ItemBody"
+          },
+          "toRecipients": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Recipient"
+            }
+          },
+          "ccRecipients": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Recipient"
+            }
+          }
+        }
+      },
+      "ItemBody": {
+        "type": "object",
+        "properties": {
+          "contentType": {
+            "type": "string",
+            "enum": ["Text", "HTML"],
+            "default": "HTML"
+          },
+          "content": {
+            "type": "string",
+            "description": "The body content (plain text or HTML)"
+          }
+        }
+      },
+      "Recipient": {
+        "type": "object",
+        "properties": {
+          "emailAddress": {
+            "$ref": "#/components/schemas/EmailAddress"
+          }
+        }
+      },
+      "EmailAddress": {
+        "type": "object",
+        "properties": {
+          "address": {
+            "type": "string",
+            "description": "The email address"
+          },
+          "name": {
+            "type": "string",
+            "description": "Display name (optional)"
+          }
+        }
+      }
+    },
+    "securitySchemes": {
+      "azure_ad": {
+        "type": "oauth2",
+        "flows": {
+          "clientCredentials": {
+            "tokenUrl": "https://login.microsoftonline.com/{tenantId}/oauth2/v2.0/token",
+            "scopes": {
+              "https://graph.microsoft.com/.default": "Access Microsoft Graph"
+            }
+          }
+        }
+      }
+    }
+  },
+  "security": [
+    {
+      "azure_ad": ["https://graph.microsoft.com/.default"]
+    }
+  ]
+}

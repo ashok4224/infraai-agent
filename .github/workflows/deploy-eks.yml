@@ -1,0 +1,122 @@
+name: Build & Deploy to AWS EKS
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'backend/**'
+      - 'frontend/**'
+      - 'k8s/**'
+      - '.github/workflows/deploy-eks.yml'
+  workflow_dispatch:
+    inputs:
+      component:
+        description: 'Component to build and deploy'
+        required: true
+        type: choice
+        options:
+          - all
+          - backend
+          - frontend
+        default: 'all'
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ap-south-1
+  AWS_ACCOUNT_ID: '803103365620'
+  ECR_REGISTRY: 803103365620.dkr.ecr.ap-south-1.amazonaws.com
+  CLUSTER_NAME: infraai-dev
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+        id: login-ecr
+
+      - name: Build and push Backend image
+        if: contains(fromJSON('["backend","all"]'), inputs.component || 'all')
+        run: |
+          docker build \
+            -t $ECR_REGISTRY/infraai/backend:latest \
+            -t $ECR_REGISTRY/infraai/backend:${{ github.sha }} \
+            -f backend/Dockerfile.prod \
+            backend/
+          docker push $ECR_REGISTRY/infraai/backend:latest
+          docker push $ECR_REGISTRY/infraai/backend:${{ github.sha }}
+
+      - name: Build and push Frontend image
+        if: contains(fromJSON('["frontend","all"]'), inputs.component || 'all')
+        run: |
+          docker build \
+            -t $ECR_REGISTRY/infraai/frontend:latest \
+            -t $ECR_REGISTRY/infraai/frontend:${{ github.sha }} \
+            -f frontend/Dockerfile.prod \
+            --build-arg VITE_API_BASE_URL=/api \
+            frontend/
+          docker push $ECR_REGISTRY/infraai/frontend:latest
+          docker push $ECR_REGISTRY/infraai/frontend:${{ github.sha }}
+
+  deploy-to-eks:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig --region $AWS_REGION --name $CLUSTER_NAME
+
+      - name: Install NGINX Ingress Controller
+        run: |
+          if ! kubectl get pods -n kube-system -l app.kubernetes.io/name=ingress-nginx --no-headers 2>/dev/null | grep -q .; then
+            echo "Installing NGINX Ingress Controller..."
+            helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+            helm repo update
+            helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
+              --namespace kube-system \
+              --set controller.service.type=LoadBalancer \
+              --set controller.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-type"=nlb \
+              --set controller.allowSnippetAnnotations=true \
+              --wait \
+              --timeout 10m
+          else
+            echo "NGINX Ingress Controller already installed"
+          fi
+
+      - name: Apply K8s manifests
+        run: |
+          kubectl apply -k k8s/overlays/eks/
+
+      - name: Verify deployment
+        run: |
+          echo "=== Nodes ==="
+          kubectl get nodes
+          echo "=== Pods (infraai) ==="
+          kubectl get pods -n infraai
+          echo "=== Services ==="
+          kubectl get svc -n infraai
+          echo "=== Ingress ==="
+          kubectl get ingress -n infraai

@@ -1,0 +1,36 @@
+name: "[DEPRECATED] Setup Azure Infrastructure"
+
+# ⚠️  This workflow is deprecated. Use deploy.yml with component=infrastructure instead.
+# It provisions all resources with private networking (VNet, Private Endpoints).
+#
+# To set up infrastructure:
+#   1. Go to Actions → "Deploy InfraAI Agent to Azure"
+#   2. Select component = "infrastructure" (or "all" for infra + deploy)
+#   3. Fill in your resource names and run
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deprecated:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Redirect
+        run: |
+          echo "============================================"
+          echo "  This workflow is DEPRECATED"
+          echo "============================================"
+          echo ""
+          echo "  Use the unified 'Deploy InfraAI Agent to Azure' workflow instead."
+          echo "  Select component = 'infrastructure' to provision resources."
+          echo "  Select component = 'all' to provision + deploy."
+          echo ""
+          echo "  The new workflow creates all resources with:"
+          echo "    - VNet with private subnets"
+          echo "    - Private Endpoint for ACR (no public access)"
+          echo "    - VNet-injected PostgreSQL (no public endpoint)"
+          echo "    - VNet-integrated App Services"
+          echo "    - Managed Identity for ACR pull (no credentials)"
+          echo "    - Alembic migrations run on container startup"
+          echo "============================================"
+          exit 1

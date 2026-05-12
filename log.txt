@@ -1,0 +1,281 @@
+Microsoft Azure
+Search data, notebooks, recents, and more...
+CTRL + P
+Jobs & Pipelines
+slx-jobcompute-job
+Run 567305428516557
+Bronze_DS_Load run
+Succeeded
+Output
+Version	Date	Changed by	Description	Reason for Changes
+1.0	2026-03-25	srnl8gm@mckesson.com	Bronze layer parallel ingestion pipeline with watermarking, control, and Delta conversion utilities.	Initial implementation for scalable data ingestion.
+1.1				
+Current notebook path: /Shared/mrx-slxdp-prod/psas_mrx_slxdp/mrx_slxdp_bronze/1_1_SLX_Bronze_Incremental_Load
+Notebook directory: /Shared/mrx-slxdp-prod/psas_mrx_slxdp/mrx_slxdp_bronze
+Config path: /Workspace/Shared/mrx-slxdp-prod/psas_mrx_slxdp/environments/config/config.yml
+File exists: True
+============================================================
+
+Configuration Values:
+============================================================
+CATALOG                        = psas_mrx_slxdp_prod
+LANDING_Folder                 = mrx_slxdp_landing/mrx_slxdp_landing-volume
+BRONZE_SCHEMA                  = mrx_slxdp_bronze
+SILVER_SCHEMA                  = mrx_slxdp_silver
+GOLD_SCHEMA                    = mrx_slxdp_gold
+BRONZE_NS                      = psas_mrx_slxdp_prod.mrx_slxdp_bronze
+SILVER_NS                      = psas_mrx_slxdp_prod.mrx_slxdp_silver
+GOLD_NS                        = psas_mrx_slxdp_prod.mrx_slxdp_gold
+CONFIG_TABLE                   = psas_mrx_slxdp_prod.mrx_slxdp_bronze.delta_share_table_config
+WATERMARK_STATE_TABLE          = psas_mrx_slxdp_prod.mrx_slxdp_bronze.watermarks
+PIPELINE_NAME                  = SLX_Bronze_Daily_Incremental
+SILVER_PIPELINE_NAME           = SLX_Silver_Daily_Incremental
+LOAD_DATE_FROM                 = '2024-01-01 00:00:00'
+CONFIG_TABLE_NAME              = delta_share_table_config
+WATERMARK_STATE_TABLE_NAME     = watermarks
+
+============================================================
+Computed Values (from 'common' section):
+============================================================
+BRONZE_NS                      = psas_mrx_slxdp_prod.mrx_slxdp_bronze
+SILVER_NS                      = psas_mrx_slxdp_prod.mrx_slxdp_silver
+GOLD_NS                        = psas_mrx_slxdp_prod.mrx_slxdp_gold
+PIPELINE_NAME                  = SLX_Bronze_Daily_Incremental
+CONFIG_TABLE                   = psas_mrx_slxdp_prod.mrx_slxdp_bronze.delta_share_table_config
+SILVER_PIPELINE_NAME           = SLX_Silver_Daily_Incremental
+WATERMARK_STATE_TABLE          = psas_mrx_slxdp_prod.mrx_slxdp_bronze.watermarks
+LOAD_DATE_FROM                 = 2024-01-01 00:00:00
+
+============================================================
+Total configuration items: 23
+(1) Spark Jobs
+ 
+cfg_df:pyspark.sql.connect.dataframe.DataFrame = [source_table: string, target_table: string ... 7 more fields]
+Watermark set to LOAD_DATE_FROM: 2024-01-01 00:00:00
+Performance configs enabled.
+(19) Spark Jobs
+ 
+[2026-04-16 12:05:50] Current time: 2026-04-16 12:05:50
+[2026-04-16 12:05:50] 24-hour threshold: 2026-04-15 12:05:50
+[2026-04-16 12:05:50] 7-day threshold: 2026-04-09 12:05:50
+[2026-04-16 12:05:55] Found 18 active table configs
+[2026-04-16 12:06:02] ✗ Skipping psas_mrx_slxdp_prod.mrx_slxdp_bronze.adjustments (DAILY): recently loaded 2026-04-15 12:07:35 (<24h ago)
+[2026-04-16 12:06:03] ✗ Skipping psas_mrx_slxdp_prod.mrx_slxdp_bronze.chain_billing_settings (WEEKLY): recently loaded 2026-04-14 07:35:18 (<7d ago)
+[2026-04-16 12:06:04] ✗ Skipping psas_mrx_slxdp_prod.mrx_slxdp_bronze.chain_feature_settings (WEEKLY): recently loaded 2026-04-14 07:35:24 (<7d ago)
+[2026-04-16 12:06:04] ✗ Skipping psas_mrx_slxdp_prod.mrx_slxdp_bronze.creditreturns (DAILY): recently loaded 2026-04-15 12:07:38 (<24h ago)
+[2026-04-16 12:06:05] ✓ Including psas_mrx_slxdp_prod.mrx_slxdp_bronze.credits (DAILY): last loaded 2026-04-15 08:05:45 (>24h ago)
+[2026-04-16 12:06:05] ✓ Including psas_mrx_slxdp_prod.mrx_slxdp_bronze.dispenses (DAILY): last loaded 2026-04-14 12:16:26 (>24h ago)
+[2026-04-16 12:06:06] ✓ Including psas_mrx_slxdp_prod.mrx_slxdp_bronze.invoices (DAILY): last loaded 2026-04-09 18:19:55 (>24h ago)
+[2026-04-16 12:06:06] ✓ Including psas_mrx_slxdp_prod.mrx_slxdp_bronze.order_profile_history (DAILY): last loaded 2026-04-14 12:38:15 (>24h ago)
+[2026-04-16 12:06:07] ✓ Including psas_mrx_slxdp_prod.mrx_slxdp_bronze.order_profile_override_history (DAILY): last loaded 2026-04-15 08:08:26 (>24h ago)
+[2026-04-16 12:06:07] ✓ Including psas_mrx_slxdp_prod.mrx_slxdp_bronze.order_profile_overrides (DAILY): last loaded 2026-04-14 12:46:06 (>24h ago)
+[2026-04-16 12:06:08] ✓ Including psas_mrx_slxdp_prod.mrx_slxdp_bronze.order_profiles (DAILY): last loaded 2026-04-14 12:47:36 (>24h ago)
+[2026-04-16 12:06:08] ✓ Including psas_mrx_slxdp_prod.mrx_slxdp_bronze.qoh (DAILY): last loaded 2026-04-06 12:45:49 (>24h ago)
+[2026-04-16 12:06:09] ✗ Skipping psas_mrx_slxdp_prod.mrx_slxdp_bronze.site_hierarchy (DAILY): recently loaded 2026-04-15 12:35:45 (<24h ago)
+[2026-04-16 12:06:09] ✓ Including psas_mrx_slxdp_prod.mrx_slxdp_bronze.site_vendors (DAILY): last loaded 2026-04-14 12:51:09 (>24h ago)
+[2026-04-16 12:06:10] ✓ Including psas_mrx_slxdp_prod.mrx_slxdp_bronze.transfer_invoices (DAILY): last loaded 2026-04-12 12:14:10 (>24h ago)
+[2026-04-16 12:06:10] ✓ Including psas_mrx_slxdp_prod.mrx_slxdp_bronze.transfer_requests (DAILY): last loaded 2026-04-12 12:15:02 (>24h ago)
+[2026-04-16 12:06:11] ✗ Skipping psas_mrx_slxdp_prod.mrx_slxdp_bronze.chain_chains (WEEKLY): recently loaded 2026-04-09 18:24:28 (<7d ago)
+[2026-04-16 12:06:12] ✗ Skipping psas_mrx_slxdp_prod.mrx_slxdp_bronze.sites (WEEKLY): recently loaded 2026-04-09 18:24:53 (<7d ago)
+[2026-04-16 12:06:12] 
+============================================================
+[2026-04-16 12:06:12] FINAL: 11 tables selected for processing (out of 18 active configs)
+[2026-04-16 12:06:12] ============================================================
+(64) Spark Jobs
+ 
+[2026-04-16 12:06:12] Starting Bronze Processing (Parallel – 5 workers)
+[2026-04-16 12:06:12] Date range: 2024-01-01 00:00:00  <=  watermark  <  2026-04-16 00:00:00
+[2026-04-16 12:06:12] START | src=prod-data-strategy.shared.bronze_credits | tgt=psas_mrx_slxdp_prod.mrx_slxdp_bronze.credits | type=OVERWRITE | wm_col=CreatedUtcDate
+[2026-04-16 12:06:12] START | src=prod-data-strategy.shared.bronze_dispenses | tgt=psas_mrx_slxdp_prod.mrx_slxdp_bronze.dispenses | type=APPEND | wm_col=CreatedUtcDate
+[2026-04-16 12:06:15] Date filter applied: 2024-01-01 00:00:00 <= CreatedUtcDate < 2026-04-16 00:00:00
+[2026-04-16 12:06:15] Date filter applied: 2024-01-01 00:00:00 <= CreatedUtcDate < 2026-04-16 00:00:00
+[2026-04-16 12:06:15] OVERWRITE → psas_mrx_slxdp_prod.mrx_slxdp_bronze.credits
+[2026-04-16 12:06:16] Incremental watermark applied: CreatedUtcDate >= 2026-04-13 14:58:57.328038
+[2026-04-16 12:06:16] APPEND → psas_mrx_slxdp_prod.mrx_slxdp_bronze.dispenses
+[2026-04-16 12:12:44] SUCCESS → psas_mrx_slxdp_prod.mrx_slxdp_bronze.dispenses
+[2026-04-16 12:17:41] Watermark collected for psas_mrx_slxdp_prod.mrx_slxdp_bronze.dispenses → 2026-04-15 16:46:55.592559
+[2026-04-16 12:17:42] START | src=prod-data-strategy.shared.bronze_invoices | tgt=psas_mrx_slxdp_prod.mrx_slxdp_bronze.invoices | type=OVERWRITE | wm_col=CreatedUtcDate
+[2026-04-16 12:17:44] Date filter applied: 2024-01-01 00:00:00 <= CreatedUtcDate < 2026-04-16 00:00:00
+[2026-04-16 12:17:44] OVERWRITE → psas_mrx_slxdp_prod.mrx_slxdp_bronze.invoices
+[2026-04-16 12:33:05] START | src=prod-data-strategy.shared.bronze_order_profile_history | tgt=psas_mrx_slxdp_prod.mrx_slxdp_bronze.order_profile_history | type=APPEND | wm_col=LastModifiedUtcDate
+[2026-04-16 12:33:05] EXCEPTION processing psas_mrx_slxdp_prod.mrx_slxdp_bronze.credits: (io.delta.sharing.client.util.UnexpectedHttpStatus) HTTP request failed with status: HTTP/1.1 500 Internal Server Error for query(Some(67a987c4)).  {"error_code":"INTERNAL_ERROR","message":"DS_INTERNAL_ERROR_FROM_DB_DS_SERVER: Failed request to sharing server\nEndpoint: https://data-sharing.ewe.pzpn
+[2026-04-16 12:33:07] Date filter applied: 2024-01-01 00:00:00 <= LastModifiedUtcDate < 2026-04-16 00:00:00
+[2026-04-16 12:33:12] Incremental watermark applied: LastModifiedUtcDate >= 2026-04-13 19:54:02.843333
+[2026-04-16 12:33:12] APPEND → psas_mrx_slxdp_prod.mrx_slxdp_bronze.order_profile_history
+[2026-04-16 12:36:28] SUCCESS → psas_mrx_slxdp_prod.mrx_slxdp_bronze.order_profile_history
+[2026-04-16 12:46:03] START | src=prod-data-strategy.shared.bronze_order_profile_override_history | tgt=psas_mrx_slxdp_prod.mrx_slxdp_bronze.order_profile_override_history | type=APPEND | wm_col=CreatedUtcDate
+[2026-04-16 12:46:03] EXCEPTION processing psas_mrx_slxdp_prod.mrx_slxdp_bronze.invoices: (io.delta.sharing.client.util.UnexpectedHttpStatus) HTTP request failed with status: HTTP/1.1 500 Internal Server Error for query(Some(bc493139)).  {"error_code":"INTERNAL_ERROR","message":""}
+
+JVM stacktrace:
+io.delta.sharing.client.util.UnexpectedHttpStatus
+	at io.delta.sharing.client.DeltaSharing
+[2026-04-16 12:46:05] Date filter applied: 2024-01-01 00:00:00 <= CreatedUtcDate < 2026-04-16 00:00:00
+[2026-04-16 12:46:06] Incremental watermark applied: CreatedUtcDate >= 2026-04-13 17:09:57.593333
+[2026-04-16 12:46:06] APPEND → psas_mrx_slxdp_prod.mrx_slxdp_bronze.order_profile_override_history
+[2026-04-16 12:46:46] SUCCESS → psas_mrx_slxdp_prod.mrx_slxdp_bronze.order_profile_override_history
+[2026-04-16 12:47:53] Watermark collected for psas_mrx_slxdp_prod.mrx_slxdp_bronze.order_profile_history → 2026-04-15 21:06:34.643333
+[2026-04-16 12:47:54] START | src=prod-data-strategy.shared.bronze_order_profile_overrides | tgt=psas_mrx_slxdp_prod.mrx_slxdp_bronze.order_profile_overrides | type=OVERWRITE | wm_col=CreatedUtcDate
+[2026-04-16 12:47:55] Date filter applied: 2024-01-01 00:00:00 <= CreatedUtcDate < 2026-04-16 00:00:00
+[2026-04-16 12:47:55] OVERWRITE → psas_mrx_slxdp_prod.mrx_slxdp_bronze.order_profile_overrides
+[2026-04-16 12:48:43] SUCCESS → psas_mrx_slxdp_prod.mrx_slxdp_bronze.order_profile_overrides
+[2026-04-16 12:48:51] Watermark collected for psas_mrx_slxdp_prod.mrx_slxdp_bronze.order_profile_overrides → 2026-04-15 21:48:06.090000
+[2026-04-16 12:48:51] START | src=prod-data-strategy.shared.bronze_order_profiles | tgt=psas_mrx_slxdp_prod.mrx_slxdp_bronze.order_profiles | type=OVERWRITE | wm_col=LastModifiedUtcDate
+[2026-04-16 12:48:53] Date filter applied: 2024-01-01 00:00:00 <= LastModifiedUtcDate < 2026-04-16 00:00:00
+[2026-04-16 12:48:53] OVERWRITE → psas_mrx_slxdp_prod.mrx_slxdp_bronze.order_profiles
+[2026-04-16 12:48:56] Watermark collected for psas_mrx_slxdp_prod.mrx_slxdp_bronze.order_profile_override_history → 2026-04-14 21:15:12.070000
+[2026-04-16 12:48:57] START | src=prod-data-strategy.shared.bronze_qoh | tgt=psas_mrx_slxdp_prod.mrx_slxdp_bronze.qoh | type=APPEND | wm_col=PartitionDate
+[2026-04-16 12:48:58] Date filter applied: 2024-01-01 00:00:00 <= PartitionDate < 2026-04-16 00:00:00
+[2026-04-16 12:48:59] Incremental watermark applied: PartitionDate >= 2026-04-05
+[2026-04-16 12:48:59] APPEND → psas_mrx_slxdp_prod.mrx_slxdp_bronze.qoh
+[2026-04-16 12:49:49] SUCCESS → psas_mrx_slxdp_prod.mrx_slxdp_bronze.order_profiles
+[2026-04-16 12:51:07] Watermark collected for psas_mrx_slxdp_prod.mrx_slxdp_bronze.order_profiles → 2026-04-15 22:58:29.676666
+[2026-04-16 12:51:07] START | src=prod-data-strategy.shared.bronze_site_vendors | tgt=psas_mrx_slxdp_prod.mrx_slxdp_bronze.site_vendors | type=OVERWRITE | wm_col=PartitionDate
+[2026-04-16 12:51:08] Date filter applied: 2024-01-01 00:00:00 <= PartitionDate < 2026-04-16 00:00:00
+[2026-04-16 12:51:08] OVERWRITE → psas_mrx_slxdp_prod.mrx_slxdp_bronze.site_vendors
+[2026-04-16 12:51:49] SUCCESS → psas_mrx_slxdp_prod.mrx_slxdp_bronze.site_vendors
+[2026-04-16 12:51:50] Watermark collected for psas_mrx_slxdp_prod.mrx_slxdp_bronze.site_vendors → 2026-03-17 05:02:49.637000
+[2026-04-16 12:51:50] START | src=prod-data-strategy.shared.bronze_transfer_invoices | tgt=psas_mrx_slxdp_prod.mrx_slxdp_bronze.transfer_invoices | type=APPEND | wm_col=ModifiedUtcDate
+[2026-04-16 12:51:52] Date filter applied: 2024-01-01 00:00:00 <= ModifiedUtcDate < 2026-04-16 00:00:00
+[2026-04-16 12:51:52] Incremental watermark applied: ModifiedUtcDate >= 2026-04-11 23:57:36.380000
+[2026-04-16 12:51:52] APPEND → psas_mrx_slxdp_prod.mrx_slxdp_bronze.transfer_invoices
+[2026-04-16 12:52:30] SUCCESS → psas_mrx_slxdp_prod.mrx_slxdp_bronze.transfer_invoices
+[2026-04-16 12:52:39] Watermark NOT collected for psas_mrx_slxdp_prod.mrx_slxdp_bronze.transfer_invoices
+[2026-04-16 12:52:39] START | src=prod-data-strategy.shared.bronze_transfer_requests | tgt=psas_mrx_slxdp_prod.mrx_slxdp_bronze.transfer_requests | type=APPEND | wm_col=ModifiedUtcDate
+[2026-04-16 12:52:41] Date filter applied: 2024-01-01 00:00:00 <= ModifiedUtcDate < 2026-04-16 00:00:00
+[2026-04-16 12:52:42] Incremental watermark applied: ModifiedUtcDate >= 2026-04-11 23:57:25.587000
+[2026-04-16 12:52:42] APPEND → psas_mrx_slxdp_prod.mrx_slxdp_bronze.transfer_requests
+[2026-04-16 12:53:22] SUCCESS → psas_mrx_slxdp_prod.mrx_slxdp_bronze.transfer_requests
+[2026-04-16 12:53:40] Watermark NOT collected for psas_mrx_slxdp_prod.mrx_slxdp_bronze.transfer_requests
+[2026-04-16 13:12:56] EXCEPTION processing psas_mrx_slxdp_prod.mrx_slxdp_bronze.qoh: (io.delta.sharing.client.util.UnexpectedHttpStatus) HTTP request failed with status: HTTP/1.1 500 Internal Server Error for query(Some(93a40469)).  {"error_code":"INTERNAL_ERROR","message":""}
+
+JVM stacktrace:
+io.delta.sharing.client.util.UnexpectedHttpStatus
+	at io.delta.sharing.client.DeltaSharing
+[2026-04-16 13:12:56] 
+Bronze processing complete. 11 tables processed.
+[2026-04-16 13:12:56] Writing 8 control record(s) to psas_mrx_slxdp_prod.mrx_slxdp_bronze.control_ingestion_loads_mat
+[2026-04-16 13:13:00] Control records written successfully.
+[2026-04-16 13:13:00] Writing 6 watermark record(s) to psas_mrx_slxdp_prod.mrx_slxdp_bronze.watermark_state
+[2026-04-16 13:13:03] Watermark records written successfully.
+[2026-04-16 13:13:03] All done.
+5.29s
+10:
+Helper: Generate Delta Conversion SQL
+[2026-04-16 13:13:03] Checking tables that need Delta conversion...
+[2026-04-16 13:13:04] Table psas_mrx_slxdp_prod.mrx_slxdp_bronze.credits is already Delta format
+[2026-04-16 13:13:04] Table psas_mrx_slxdp_prod.mrx_slxdp_bronze.dispenses is already Delta format
+[2026-04-16 13:13:05] Table psas_mrx_slxdp_prod.mrx_slxdp_bronze.invoices is already Delta format
+[2026-04-16 13:13:05] Table psas_mrx_slxdp_prod.mrx_slxdp_bronze.order_profile_history is already Delta format
+[2026-04-16 13:13:06] Table psas_mrx_slxdp_prod.mrx_slxdp_bronze.order_profile_override_history is already Delta format
+[2026-04-16 13:13:06] Table psas_mrx_slxdp_prod.mrx_slxdp_bronze.order_profile_overrides is already Delta format
+[2026-04-16 13:13:07] Table psas_mrx_slxdp_prod.mrx_slxdp_bronze.order_profiles is already Delta format
+[2026-04-16 13:13:07] Table psas_mrx_slxdp_prod.mrx_slxdp_bronze.qoh is already Delta format
+[2026-04-16 13:13:07] Table psas_mrx_slxdp_prod.mrx_slxdp_bronze.site_vendors is already Delta format
+[2026-04-16 13:13:08] Table psas_mrx_slxdp_prod.mrx_slxdp_bronze.transfer_invoices is already Delta format
+[2026-04-16 13:13:08] Table psas_mrx_slxdp_prod.mrx_slxdp_bronze.transfer_requests is already Delta format
+[2026-04-16 13:13:08] All tables are already Delta format or will be created as Delta
+[2026-04-16 13:13:08] No conversion needed!
+# # ------------------ Optimize Delta Tables with ZORDER (Parallel) ------------------
+# # Run this cell after data loads to optimize query performance
+
+# from concurrent.futures import ThreadPoolExecutor
+
+# def optimize_table(table_name, zorder_columns=None):
+#     """Optimize a Delta table with optional ZORDER"""
+#     if not table_exists(table_name):
+#         log(f"Table {table_name} does not exist")
+#         return (table_name, zorder_columns, "FAILED")
+    
+#     if not is_delta_table_safe(table_name):
+#         log(f"Table {table_name} is not Delta format - skipping optimization")
+#         return (table_name, zorder_columns, "FAILED")
+    
+#     try:
+#         if zorder_columns:
+#             if isinstance(zorder_columns, str):
+#                 zorder_columns = [zorder_columns]
+#             zorder_cols = ", ".join(zorder_columns)
+#             log(f"Running OPTIMIZE {table_name} ZORDER BY ({zorder_cols})")
+#             spark.sql(f"OPTIMIZE {table_name} ZORDER BY ({zorder_cols})")
+#         else:
+#             log(f"Running OPTIMIZE {table_name}")
+#             spark.sql(f"OPTIMIZE {table_name}")
+        
+#         log(f"Optimization complete for {table_name}")
+#         return (table_name, zorder_columns, "SUCCESS")
+#     except Exception as e:
+#         log(f"Optimization failed for {table_name}: {str(e)}")
+#         return (table_name, zorder_columns, "FAILED")
+
+# def optimize_single_table(r):
+#     """Wrapper function for parallel execution"""
+#     tgt = r["target_table"]
+#     wm_col = r["watermark_column"] if r["watermark_column"] not in (None, "null") else None
+    
+#     if tgt in SKIP_TARGETS:
+#         return (tgt, wm_col, "SKIPPED")
+    
+#     return optimize_table(tgt, wm_col)
+
+# # Optimize tables in parallel (8 at a time)
+# log("Starting parallel table optimization with 8 workers...")
+# with ThreadPoolExecutor(max_workers=8) as executor:
+#     optimization_results = list(executor.map(optimize_single_table, cfgs))
+# log("Optimization complete")
+
+# # Display results
+# opt_df = spark.createDataFrame(
+#     optimization_results,
+#     ["table_name", "zorder_column", "status"]
+# )
+# display(opt_df)
+
+# ------------------ Final Summary ------------------
+log("===== PIPELINE SUMMARY =====")
+
+# Handle empty run_log
+if len(run_log) == 0:
+    log("No tables were processed in this run")
+else:
+    summary_df = spark.createDataFrame(
+        run_log,
+        ["source_table", "target_table", "status", "load_type"]
+    )
+    display(summary_df)
+
+log(f"RUN COMPLETE | RUN_ID={RUN_ID}")
+summary_df:pyspark.sql.connect.dataframe.DataFrame = [source_table: string, target_table: string ... 2 more fields]
+[2026-04-16 13:13:08] ===== PIPELINE SUMMARY =====
+
+Table
+[2026-04-16 13:13:09] RUN COMPLETE | RUN_ID=73f4d1d7-93d9-43d0-9a6c-6e6ad2615369
+log(f"RUN COMPLETE | RUN_ID={RUN_ID}")
+[2026-04-16 13:13:09] RUN COMPLETE | RUN_ID=73f4d1d7-93d9-43d0-9a6c-6e6ad2615369
+Details
+Job ID
+762904504139660 
+Job run ID
+567305428516557 
+Task run ID
+608710060369401 
+Run as
+dzpkkc2
+Launched
+By scheduler
+Started
+Apr 16, 2026, 05:30 PM
+Ended
+Apr 16, 2026, 06:43 PM
+Duration
+1h 12m 48s
+Status
+Succeeded
+Lineage
+Notebook
+/Workspace/Shared/mrx-slxdp-prod/psas_mrx_slxdp/mrx_slxdp_bronze/1_1_SLX_Bronze_Incremental_Load
+Compute
+Acquiring instances
+slx_job_compute_cluster
+Driver: Standard_E8as_v4 · Workers: Standard_E8as_v4 · 6-40 workers · Release: 17.3.9
+Streaming metrics
+No streaming metrics available for this task run.

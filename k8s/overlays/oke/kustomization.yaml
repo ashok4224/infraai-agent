@@ -1,0 +1,36 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: infraai
+
+resources:
+  - ../../base
+  - ocir-secret.yaml
+
+patches:
+  # OKE-specific ingress with OCI Native Ingress Controller
+  - path: ingress-patch.yaml
+  # OCI Block Volume storage class for PostgreSQL PVC
+  - path: postgres-patch.yaml
+  # Add imagePullSecrets for OCIR to backend
+  - path: backend-patch.yaml
+  # Add imagePullSecrets for OCIR to frontend
+  - path: frontend-patch.yaml
+
+images:
+  - name: REGISTRY/infraai/backend
+    newName: iad.ocir.io/TENANCY/infraai/backend    # Change: region + tenancy
+    newTag: latest
+  - name: REGISTRY/infraai/frontend
+    newName: iad.ocir.io/TENANCY/infraai/frontend   # Change: region + tenancy
+    newTag: latest
+
+# Override secrets for OCI PostgreSQL or Autonomous DB
+# Uncomment and fill in real values:
+# secretGenerator:
+#   - name: infraai-secrets
+#     behavior: replace
+#     literals:
+#       - DATABASE_URL=postgresql+asyncpg://user:password@oci-pg-host:5432/infraaiagent?ssl=require
+#       - SECRET_KEY=your-64-char-random-string
+#       - ADMIN_PASSWORD=YourSecureAdminPassword
