@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       component:
-        description: 'Component to build and deploy'
+        description: 'Component'
         required: true
         type: choice
         options:
@@ -26,7 +26,6 @@ permissions:
 
 env:
   AWS_REGION: ap-south-1
-  AWS_ACCOUNT_ID: '803103365620'
   ECR_REGISTRY: 803103365620.dkr.ecr.ap-south-1.amazonaws.com
   CLUSTER_NAME: infraai-dev
 
@@ -45,29 +44,33 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Login to Amazon ECR
-        uses: aws-actions/amazon-ecr-login@v2
         id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build and push Backend image
-        run: |
-          docker build \
-            -t $ECR_REGISTRY/infraai/backend:latest \
-            -t $ECR_REGISTRY/infraai/backend:${{ github.sha }} \
-            -f backend/Dockerfile.prod \
-            backend/
-          docker push $ECR_REGISTRY/infraai/backend:latest
-          docker push $ECR_REGISTRY/infraai/backend:${{ github.sha }}
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-      - name: Build and push Frontend image
-        run: |
-          docker build \
-            -t $ECR_REGISTRY/infraai/frontend:latest \
-            -t $ECR_REGISTRY/infraai/frontend:${{ github.sha }} \
-            -f frontend/Dockerfile.prod \
-            --build-arg VITE_API_BASE_URL=/api \
-            frontend/
-          docker push $ECR_REGISTRY/infraai/frontend:latest
-          docker push $ECR_REGISTRY/infraai/frontend:${{ github.sha }}
+      - name: Build and push Backend
+        uses: docker/build-push-action@v6
+        with:
+          context: backend/
+          file: backend/Dockerfile.prod
+          push: true
+          tags: |
+            ${{ env.ECR_REGISTRY }}/infraai/backend:latest
+            ${{ env.ECR_REGISTRY }}/infraai/backend:${{ github.sha }}
+
+      - name: Build and push Frontend
+        uses: docker/build-push-action@v6
+        with:
+          context: frontend/
+          file: frontend/Dockerfile.prod
+          push: true
+          build-args: |
+            VITE_API_BASE_URL=/api
+          tags: |
+            ${{ env.ECR_REGISTRY }}/infraai/frontend:latest
+            ${{ env.ECR_REGISTRY }}/infraai/frontend:${{ github.sha }}
 
   deploy-to-eks:
     needs: build-and-push
@@ -84,37 +87,24 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Update kubeconfig
-        run: |
-          aws eks update-kubeconfig --region $AWS_REGION --name $CLUSTER_NAME
-
-      - name: Install NGINX Ingress Controller
-        run: |
-          if ! kubectl get pods -n kube-system -l app.kubernetes.io/name=ingress-nginx --no-headers 2>/dev/null | grep -q .; then
-            echo "Installing NGINX Ingress Controller..."
-            helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
-            helm repo update
-            helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
-              --namespace kube-system \
-              --set controller.service.type=LoadBalancer \
-              --set controller.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-type"=nlb \
-              --set controller.allowSnippetAnnotations=true \
-              --wait \
-              --timeout 10m
-          else
-            echo "NGINX Ingress Controller already installed"
-          fi
+        run: aws eks update-kubeconfig --region $AWS_REGION --name $CLUSTER_NAME
 
       - name: Apply K8s manifests
-        run: |
-          kubectl apply -k k8s/overlays/eks/
+        run: kubectl apply -k k8s/overlays/eks/
 
-      - name: Verify deployment
+      - name: Restart deployments to pull new images
         run: |
-          echo "=== Nodes ==="
+          kubectl rollout restart deployment/infraai-backend -n infraai
+          kubectl rollout restart deployment/infraai-frontend -n infraai
+
+      - name: Wait for deployments
+        run: |
+          kubectl wait --for=condition=available deployment/infraai-backend -n infraai --timeout=5m
+          kubectl wait --for=condition=available deployment/infraai-frontend -n infraai --timeout=5m
+
+      - name: Verify
+        run: |
           kubectl get nodes
-          echo "=== Pods (infraai) ==="
           kubectl get pods -n infraai
-          echo "=== Services ==="
           kubectl get svc -n infraai
-          echo "=== Ingress ==="
           kubectl get ingress -n infraai
