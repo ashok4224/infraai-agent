@@ -4,12 +4,12 @@ kind: Kustomization
 resources:
   - ../../base
 
-patchesStrategicMerge:
-  - postgres-patch.yaml
-  - backend-patch.yaml
-  - frontend-patch.yaml
-  - ingress-patch.yaml
-  - secrets-patch.yaml
+patches:
+  - path: postgres-patch.yaml
+  - path: backend-patch.yaml
+  - path: frontend-patch.yaml
+  - path: ingress-patch.yaml
+  - path: secrets-patch.yaml
 
 images:
   - name: REGISTRY/infraai/backend
