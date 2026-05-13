@@ -1,11 +1,8 @@
 name: Deploy Frontend to Azure App Service
 
+# Disabled: Azure App Service not in use — deployment target is AWS EKS (deploy-eks.yml)
+# Re-enable by restoring the 'on: push' trigger and configuring AZURE_CREDENTIALS secret.
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'frontend/**'
-      - '.github/workflows/deploy-frontend.yml'
   workflow_dispatch:
     inputs:
       environment:
