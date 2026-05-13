@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     AZURE_AI_FOUNDRY_ENDPOINT: str = ""
     AZURE_AI_FOUNDRY_PROJECT: str = ""
     AZURE_AI_FOUNDRY_MODEL_DEPLOYMENT: str = "gpt-4o"
+    AZURE_AI_FOUNDRY_KEY: str = ""
     AZURE_TENANT_ID: str = ""
     AZURE_CLIENT_ID: str = ""
     AZURE_CLIENT_SECRET: str = ""
