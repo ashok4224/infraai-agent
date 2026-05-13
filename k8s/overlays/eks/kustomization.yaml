@@ -9,7 +9,17 @@ patches:
   - path: backend-patch.yaml
   - path: frontend-patch.yaml
   - path: ingress-patch.yaml
-  - path: secrets-patch.yaml
+
+configMapGenerator:
+  - name: foundry-service-patch
+    namespace: infraai
+    options:
+      disableNameSuffixHash: true
+    files:
+      - azure_foundry_service.py=../../../backend/app/services/azure_foundry_service.py
+      - config.py=../../../backend/app/config.py
+      - foundry_analyzer.py=../../../backend/app/services/foundry_analyzer.py
+      - chat_service.py=../../../backend/app/services/chat_service.py
 
 images:
   - name: REGISTRY/infraai/backend

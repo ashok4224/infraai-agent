@@ -38,3 +38,7 @@ Thumbs.db
 
 # MCP configs
 *.mcp.json
+
+# Kubernetes secrets (contain real credentials - never commit)
+secrets-patch.yaml
+**/secrets-patch.yaml

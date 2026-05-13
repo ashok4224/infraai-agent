@@ -6,6 +6,8 @@ Uses the Conversations + Responses API (v2.x pattern):
   openai_client.responses.create()      -> agent response
   openai_client.conversations.delete()  -> cleanup
 
+Falls back to direct Chat Completions when agent_reference is not available.
+
 The ``foundry_agent_name`` stored in the database is the agent
 **name** registered in the Microsoft Foundry project.
 """
@@ -19,12 +21,21 @@ logger = logging.getLogger(__name__)
 
 _project_client = None
 _openai_client = None
+_agent_reference_available = None  # None=unknown, True=available, False=not available
 
 
 # -- Credentials -------------------------------------------------------------
 
 def _get_credential_async():
-    """Build an async Azure credential from settings."""
+    """Build an async Azure credential from settings.
+
+    When AZURE_AI_FOUNDRY_KEY is set, uses AzureKeyCredential.
+    Falls back to service principal, then DefaultAzureCredential.
+    """
+    if settings.AZURE_AI_FOUNDRY_KEY:
+        from azure.core.credentials import AzureKeyCredential
+        return AzureKeyCredential(settings.AZURE_AI_FOUNDRY_KEY)
+
     from azure.identity.aio import ClientSecretCredential, DefaultAzureCredential
 
     if settings.AZURE_CLIENT_ID and settings.AZURE_CLIENT_SECRET and settings.AZURE_TENANT_ID:
@@ -34,6 +45,27 @@ def _get_credential_async():
             client_secret=settings.AZURE_CLIENT_SECRET,
         )
     return DefaultAzureCredential()
+
+
+async def _api_key_get(path: str) -> dict:
+    """Make a direct HTTP GET to the Foundry data plane using the API key.
+    Used when AZURE_AI_FOUNDRY_KEY is set, since AIProjectClient with
+    AzureKeyCredential sends 'Authorization: Bearer <key>' but the Foundry
+    Projects API requires 'api-key: <key>' header.
+    """
+    import httpx
+    endpoint = settings.AZURE_AI_FOUNDRY_ENDPOINT.rstrip("/")
+    url = f"{endpoint}/{path.lstrip('/')}"
+    if "api-version=" not in url:
+        url += ("&" if "?" in url else "?") + "api-version=v1"
+    headers = {
+        "api-key": settings.AZURE_AI_FOUNDRY_KEY,
+        "Content-Type": "application/json",
+    }
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(url, headers=headers, timeout=30.0)
+        resp.raise_for_status()
+        return resp.json()
 
 
 # -- Client lifecycle ---------------------------------------------------------
@@ -69,19 +101,68 @@ async def _ensure_clients():
     return _project_client, _openai_client
 
 
+# -- Direct Chat Completion fallback ------------------------------------------
+
+def _make_direct_openai_client():
+    """Create a plain AsyncOpenAI client that authenticates via api-key header.
+
+    Bypasses AIProjectClient's Azure credential wrapper which requires
+    get_token() and does not work with AzureKeyCredential.
+    """
+    import openai
+    endpoint = settings.AZURE_AI_FOUNDRY_ENDPOINT.rstrip("/")
+    # The project endpoint's OpenAI-compatible base URL
+    base_url = f"{endpoint}/openai/v1"
+    return openai.AsyncOpenAI(
+        api_key=settings.AZURE_AI_FOUNDRY_KEY,
+        base_url=base_url,
+        default_headers={"api-key": settings.AZURE_AI_FOUNDRY_KEY},
+        max_retries=2,
+    )
+
+
+async def _run_chat_completion(messages: list[dict], timeout: float = 120.0) -> str:
+    """Fallback: run a direct chat completion using the deployed model."""
+    client = _make_direct_openai_client()
+    model = settings.AZURE_AI_FOUNDRY_MODEL_DEPLOYMENT or "gpt-4o"
+    try:
+        async with asyncio.timeout(timeout):
+            response = await client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=0.2,
+                max_tokens=4096,
+            )
+            return response.choices[0].message.content or "(No response)"
+    except Exception as e:
+        logger.error("Direct chat completion failed: %s", e)
+        raise
+    finally:
+        await client.close()
+
+
 # -- Core: run an agent -------------------------------------------------------
 
 async def run_agent(agent_id: str, messages: list[dict], timeout: float = 120.0) -> str:
-    """Run a Foundry agent using the Conversations + Responses API.
+    """Run a Foundry agent, falling back to direct Chat Completions.
 
-    ``agent_id`` is the agent name registered in Microsoft Foundry.
-    Flow:
-      1. Create a conversation with the caller's messages.
-      2. Call responses.create() with an agent_reference.
-      3. Return the agent's text response.
-      4. Delete the conversation to clean up.
+    When API key auth is used (AZURE_AI_FOUNDRY_KEY is set), the
+    AIProjectClient's openai wrapper cannot authenticate Conversations/
+    Responses API calls (requires get_token). Use direct chat completions.
     """
+    global _agent_reference_available
+
+    # When using API key, always use direct chat completions
+    if settings.AZURE_AI_FOUNDRY_KEY:
+        logger.debug("API key auth: using direct chat completion for agent %s", agent_id)
+        return await _run_chat_completion(messages, timeout=timeout)
+
     _, openai_client = await _ensure_clients()
+
+    # Skip Responses API if we already know it's not available
+    if _agent_reference_available is False:
+        logger.debug("Using direct chat completion for agent %s (agent_reference unavailable)", agent_id)
+        return await _run_chat_completion(messages, timeout=timeout)
 
     conversation_id = None
     try:
@@ -111,6 +192,8 @@ async def run_agent(agent_id: str, messages: list[dict], timeout: float = 120.0)
                 },
             )
 
+            _agent_reference_available = True
+
             # 3. Extract text -- prefer output_text, fall back to output items
             text = getattr(response, "output_text", None)
             if text:
@@ -129,6 +212,19 @@ async def run_agent(agent_id: str, messages: list[dict], timeout: float = 120.0)
         logger.warning("Foundry agent %s timed out after %.0fs", agent_id, timeout)
         raise TimeoutError(f"Agent run timed out after {int(timeout)}s")
     except Exception as e:
+        err_str = str(e).lower()
+        # If agent_reference is not supported, fall back to direct completions
+        if any(kw in err_str for kw in ("agent", "not found", "404", "unsupported", "not supported", "agent_reference")):
+            logger.warning("agent_reference not available for %s (%s) - falling back to direct chat completion", agent_id, e)
+            _agent_reference_available = False
+            # Clean up conversation if created
+            if conversation_id and _openai_client:
+                try:
+                    await _openai_client.conversations.delete(conversation_id=conversation_id)
+                except Exception:
+                    pass
+                conversation_id = None
+            return await _run_chat_completion(messages, timeout=timeout)
         logger.error("Foundry agent %s call failed: %s", agent_id, e)
         raise
     finally:
@@ -146,6 +242,17 @@ async def run_agent(agent_id: str, messages: list[dict], timeout: float = 120.0)
 async def list_agents() -> list[dict]:
     """List deployments available in the Foundry project."""
     try:
+        if settings.AZURE_AI_FOUNDRY_KEY:
+            data = await _api_key_get("deployments")
+            return [
+                {
+                    "id": d.get("name", ""),
+                    "name": d.get("name", ""),
+                    "model": d.get("modelName", ""),
+                    "instructions": "",
+                }
+                for d in data.get("value", [])
+            ]
         client, _ = await _ensure_clients()
         result = []
         async for deployment in client.deployments.list():
@@ -164,6 +271,14 @@ async def list_agents() -> list[dict]:
 async def test_connection() -> dict:
     """Test connectivity to Azure AI Foundry."""
     try:
+        if settings.AZURE_AI_FOUNDRY_KEY:
+            data = await _api_key_get("deployments")
+            count = len(data.get("value", []))
+            return {
+                "success": True,
+                "message": f"Connected to Azure AI Foundry ({count} deployment(s) found)",
+                "agent_count": count,
+            }
         client, _ = await _ensure_clients()
         count = 0
         async for _ in client.deployments.list():

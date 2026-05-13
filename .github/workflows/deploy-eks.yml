@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       component:
-        description: 'Component'
+        description: 'Component to build and deploy'
         required: true
         type: choice
         options:
@@ -51,6 +51,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Build and push Backend
+        if: ${{ github.event.inputs.component == 'all' || github.event.inputs.component == 'backend' || github.event_name == 'push' }}
         uses: docker/build-push-action@v6
         with:
           context: backend/
@@ -59,8 +60,11 @@ jobs:
           tags: |
             ${{ env.ECR_REGISTRY }}/infraai/backend:latest
             ${{ env.ECR_REGISTRY }}/infraai/backend:${{ github.sha }}
+          cache-from: type=registry,ref=${{ env.ECR_REGISTRY }}/infraai/backend:latest
+          cache-to: type=inline
 
       - name: Build and push Frontend
+        if: ${{ github.event.inputs.component == 'all' || github.event.inputs.component == 'frontend' || github.event_name == 'push' }}
         uses: docker/build-push-action@v6
         with:
           context: frontend/
@@ -71,6 +75,8 @@ jobs:
           tags: |
             ${{ env.ECR_REGISTRY }}/infraai/frontend:latest
             ${{ env.ECR_REGISTRY }}/infraai/frontend:${{ github.sha }}
+          cache-from: type=registry,ref=${{ env.ECR_REGISTRY }}/infraai/frontend:latest
+          cache-to: type=inline
 
   deploy-to-eks:
     needs: build-and-push
@@ -89,18 +95,34 @@ jobs:
       - name: Update kubeconfig
         run: aws eks update-kubeconfig --region $AWS_REGION --name $CLUSTER_NAME
 
+      - name: Apply Kubernetes secret from GitHub Secrets
+        run: |
+          kubectl create secret generic infraai-secrets \
+            --namespace infraai \
+            --from-literal=DATABASE_URL="${{ secrets.DATABASE_URL }}" \
+            --from-literal=SECRET_KEY="${{ secrets.SECRET_KEY }}" \
+            --from-literal=ADMIN_PASSWORD="${{ secrets.ADMIN_PASSWORD }}" \
+            --from-literal=AZURE_TENANT_ID="${{ secrets.AZURE_TENANT_ID }}" \
+            --from-literal=AZURE_CLIENT_ID="${{ secrets.AZURE_CLIENT_ID }}" \
+            --from-literal=AZURE_CLIENT_SECRET="${{ secrets.AZURE_CLIENT_SECRET }}" \
+            --from-literal=AZURE_AI_FOUNDRY_KEY="${{ secrets.AZURE_AI_FOUNDRY_KEY }}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
       - name: Apply K8s manifests
         run: kubectl apply -k k8s/overlays/eks/
 
-      - name: Restart deployments to pull new images
-        run: |
-          kubectl rollout restart deployment/infraai-backend -n infraai
-          kubectl rollout restart deployment/infraai-frontend -n infraai
+      - name: Restart backend deployment
+        if: ${{ github.event.inputs.component == 'all' || github.event.inputs.component == 'backend' || github.event_name == 'push' }}
+        run: kubectl rollout restart deployment/infraai-backend -n infraai
 
-      - name: Wait for deployments
+      - name: Restart frontend deployment
+        if: ${{ github.event.inputs.component == 'all' || github.event.inputs.component == 'frontend' || github.event_name == 'push' }}
+        run: kubectl rollout restart deployment/infraai-frontend -n infraai
+
+      - name: Wait for rollout
         run: |
-          kubectl wait --for=condition=available deployment/infraai-backend -n infraai --timeout=5m
-          kubectl wait --for=condition=available deployment/infraai-frontend -n infraai --timeout=5m
+          kubectl rollout status deployment/infraai-backend -n infraai --timeout=5m
+          kubectl rollout status deployment/infraai-frontend -n infraai --timeout=5m
 
       - name: Verify
         run: |
