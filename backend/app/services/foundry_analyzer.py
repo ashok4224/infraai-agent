@@ -202,11 +202,24 @@ async def analyze_alert_with_foundry(alert_id: str, analyst_hint: str | None = N
             else:
                 prevention_str = prevention_raw
 
+            raw_action_plan = ai_response.get("action_plan", [])
+            action_plan_normalized = []
+            for _item in (raw_action_plan if isinstance(raw_action_plan, list) else []):
+                if isinstance(_item, str):
+                    action_plan_normalized.append(_item)
+                elif isinstance(_item, dict):
+                    _parts = []
+                    if _item.get("step"): _parts.append(str(_item["step"]))
+                    if _item.get("description"): _parts.append(str(_item["description"]))
+                    action_plan_normalized.append(": ".join(_parts) if _parts else json.dumps(_item))
+                else:
+                    action_plan_normalized.append(str(_item))
+
             analysis = AlertAnalysis(
                 alert_id=alert.id,
                 root_cause=ai_response.get("root_cause") if isinstance(ai_response.get("root_cause"), (str, type(None))) else str(ai_response.get("root_cause")),
                 confidence_score=ai_response.get("confidence_score"),
-                action_plan=ai_response.get("action_plan", []),
+                action_plan=action_plan_normalized,
                 fix_commands=fix_commands,
                 prevention_steps=prevention_str,
                 risk_level=ai_response.get("risk_level") if isinstance(ai_response.get("risk_level"), (str, type(None))) else str(ai_response.get("risk_level")),

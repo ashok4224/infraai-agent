@@ -533,12 +533,21 @@ export default function AlertDetailPage() {
                 <div className="mb-4">
                   <h4 className="text-sm font-medium text-gray-500 mb-2">Action Plan</h4>
                   <ol className="space-y-2">
-                    {(analysis.action_plan || []).map((step, i) => (
-                      <li key={i} className="flex gap-3 text-sm">
-                        <span className="flex-shrink-0 flex h-6 w-6 items-center justify-center rounded-full bg-brand-500 text-white text-xs font-bold">{i + 1}</span>
-                        <span className="text-gray-700 pt-0.5">{step}</span>
-                      </li>
-                    ))}
+                    {(analysis.action_plan || []).map((step, i) => {
+                      const stepText = typeof step === 'string'
+                        ? step
+                        : (step as any)?.description
+                          ? `${(step as any).step ? (step as any).step + ': ' : ''}${(step as any).description}`
+                          : (step as any)?.step
+                            ? String((step as any).step)
+                            : JSON.stringify(step);
+                      return (
+                        <li key={i} className="flex gap-3 text-sm">
+                          <span className="flex-shrink-0 flex h-6 w-6 items-center justify-center rounded-full bg-brand-500 text-white text-xs font-bold">{i + 1}</span>
+                          <span className="text-gray-700 pt-0.5">{stepText}</span>
+                        </li>
+                      );
+                    })}
                   </ol>
                 </div>
 
