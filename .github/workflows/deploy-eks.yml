@@ -109,7 +109,7 @@ jobs:
             --dry-run=client -o yaml | kubectl apply -f -
 
       - name: Apply K8s manifests
-        run: kubectl apply -k k8s/overlays/eks/
+        run: kubectl kustomize --load-restrictor=LoadRestrictionsNone k8s/overlays/eks/ | kubectl apply -f -
 
       - name: Restart backend deployment
         if: ${{ github.event.inputs.component == 'all' || github.event.inputs.component == 'backend' || github.event_name == 'push' }}
