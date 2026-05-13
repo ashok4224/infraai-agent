@@ -90,6 +90,10 @@ export default function AlertDetailPage() {
 
   useEffect(() => { fetchAlert(); }, [id]);
 
+  // Clean up any running poll interval when the component unmounts
+  const pollRef = useState<ReturnType<typeof setInterval> | null>(null);
+  useEffect(() => () => { if (pollRef[0]) clearInterval(pollRef[0]); }, []);
+
   const handleReanalyze = async (hint?: string) => {
     setShowHintModal(false);
     setReanalyzing(true);
@@ -98,6 +102,7 @@ export default function AlertDetailPage() {
       // Poll for completion with a maximum of 60 attempts (~3 min)
       let attempts = 0;
       const poll = setInterval(async () => {
+        pollRef[1](poll);
         attempts++;
         try {
           const res = await api.get(`/alerts/${id}`);
@@ -432,7 +437,7 @@ export default function AlertDetailPage() {
           <div className="card">
             <h3 className="font-semibold text-gray-700 mb-2">Labels</h3>
             <div className="flex flex-wrap gap-1">
-              {Object.entries(alert.labels).map(([k, v]) => (
+              {Object.entries(alert.labels || {}).map(([k, v]) => (
                 <span key={k} className="inline-block bg-gray-100 text-xs px-2 py-1 rounded">{k}={v}</span>
               ))}
             </div>
@@ -525,7 +530,7 @@ export default function AlertDetailPage() {
                 <div className="mb-4">
                   <h4 className="text-sm font-medium text-gray-500 mb-2">Action Plan</h4>
                   <ol className="space-y-2">
-                    {analysis.action_plan.map((step, i) => (
+                    {(analysis.action_plan || []).map((step, i) => (
                       <li key={i} className="flex gap-3 text-sm">
                         <span className="flex-shrink-0 flex h-6 w-6 items-center justify-center rounded-full bg-brand-500 text-white text-xs font-bold">{i + 1}</span>
                         <span className="text-gray-700 pt-0.5">{step}</span>
@@ -618,11 +623,11 @@ export default function AlertDetailPage() {
               </div>
 
               {/* Tools & Logs */}
-              {analysis.tools_called.length > 0 && (
+              {(analysis.tools_called || []).length > 0 && (
                 <div className="card">
                   <h3 className="font-semibold text-gray-700 mb-3">Tools Called</h3>
                   <div className="space-y-2">
-                    {analysis.tools_called.map((t: any, i: number) => (
+                    {(analysis.tools_called || []).map((t: any, i: number) => (
                       <div key={i} className="flex items-center gap-2 text-sm bg-gray-50 px-3 py-2 rounded">
                         <ShieldCheck className="h-4 w-4 text-brand-500" />
                         <span className="font-medium">{t.tool}</span>
@@ -634,7 +639,7 @@ export default function AlertDetailPage() {
                 </div>
               )}
 
-              {Object.keys(analysis.logs_collected).length > 0 && (
+              {Object.keys(analysis.logs_collected || {}).length > 0 && (
                 <div className="card">
                   <h3 className="font-semibold text-gray-700 mb-3">Collected Logs</h3>
                   <pre className="text-xs bg-gray-900 text-green-400 rounded-lg p-4 overflow-x-auto max-h-80">
