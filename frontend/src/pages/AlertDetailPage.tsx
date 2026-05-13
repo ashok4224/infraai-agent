@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import api from '../api/client';
 import { ArrowLeft, RotateCw, ShieldCheck, Terminal, Copy, Check, AlertTriangle, Info, Database, Server, Tag, Layers, Cpu, HardDrive, MemoryStick, Network, Container, MessageSquare, X, Trash2, XCircle, CheckCircle, Send, StickyNote, Play } from 'lucide-react';
@@ -91,8 +91,8 @@ export default function AlertDetailPage() {
   useEffect(() => { fetchAlert(); }, [id]);
 
   // Clean up any running poll interval when the component unmounts
-  const pollRef = useState<ReturnType<typeof setInterval> | null>(null);
-  useEffect(() => () => { if (pollRef[0]) clearInterval(pollRef[0]); }, []);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
 
   const handleReanalyze = async (hint?: string) => {
     setShowHintModal(false);
@@ -102,20 +102,23 @@ export default function AlertDetailPage() {
       // Poll for completion with a maximum of 60 attempts (~3 min)
       let attempts = 0;
       const poll = setInterval(async () => {
-        pollRef[1](poll);
+        pollRef.current = poll;
         attempts++;
         try {
           const res = await api.get(`/alerts/${id}`);
           if (res.data.analysis_status !== 'analyzing' && res.data.analysis_status !== 'pending') {
             setAlert(res.data);
             clearInterval(poll);
+            pollRef.current = null;
             setReanalyzing(false);
           } else if (attempts >= 60) {
             clearInterval(poll);
+            pollRef.current = null;
             setReanalyzing(false);
           }
         } catch {
           clearInterval(poll);
+          pollRef.current = null;
           setReanalyzing(false);
         }
       }, 3000);
@@ -501,7 +504,7 @@ export default function AlertDetailPage() {
                   <h3 className="text-lg font-semibold text-gray-800">AI Analysis</h3>
                   <div className="flex items-center gap-3 text-xs text-gray-500">
                     <span className={`badge ${riskColor}`}>{analysis.risk_level} Risk</span>
-                    <span>Confidence: {Math.round(analysis.confidence_score * 100)}%</span>
+                    <span>Confidence: {analysis.confidence_score != null ? Math.round(analysis.confidence_score * 100) : 'N/A'}%</span>
                     <span>{analysis.ai_provider_used} / {analysis.ai_model_used}</span>
                   </div>
                 </div>
@@ -551,7 +554,7 @@ export default function AlertDetailPage() {
                               <span className="text-sm font-medium text-gray-800">{cmd.description}</span>
                             </div>
                             <div className="flex items-center gap-2">
-                              <span className={`text-xs px-2 py-0.5 rounded-full ${cmd.risk_level.toLowerCase() === 'high' || cmd.risk_level.toLowerCase() === 'critical' ? 'bg-red-100 text-red-700' : 'bg-gray-200 text-gray-700'}`}>
+                              <span className={`text-xs px-2 py-0.5 rounded-full ${(cmd.risk_level || '').toLowerCase() === 'high' || (cmd.risk_level || '').toLowerCase() === 'critical' ? 'bg-red-100 text-red-700' : 'bg-gray-200 text-gray-700'}`}>
                                 {cmd.risk_level} Risk
                               </span>
                               {cmd.requires_approval && (
