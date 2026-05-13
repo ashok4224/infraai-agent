@@ -46,6 +46,34 @@ def _make_json_serializable(obj):
         return str(obj)
 
 
+def _normalize_text_field(val) -> str | None:
+    """Ensure a field that must be a plain string actually is one.
+
+    The AI occasionally returns fields like ``prevention_steps`` or
+    ``root_cause`` as a dict (e.g. ``{'steps': [...]}`` or
+    ``{'text': '...'}``), or as a list of strings, causing
+    asyncpg DataError when writing to a VARCHAR column.  This helper
+    coerces any such value to a plain string so the INSERT always works.
+    """
+    if val is None:
+        return None
+    if isinstance(val, str):
+        return val
+    if isinstance(val, dict):
+        # Common AI mis-shapes: {'steps': [...]} or {'text': '...'} or {'prevention': '...'}
+        for key in ("text", "steps", "prevention", "prevention_steps", "content", "summary"):
+            if key in val:
+                inner = val[key]
+                if isinstance(inner, list):
+                    return "\n".join(str(item) for item in inner)
+                return str(inner)
+        # Fallback: dump the whole dict as readable text
+        return json.dumps(val)
+    if isinstance(val, list):
+        return "\n".join(str(item) for item in val)
+    return str(val)
+
+
 # Max queries the AI is allowed to generate per alert
 _MAX_GENERATED_QUERIES = 8
 
@@ -387,12 +415,12 @@ async def analyze_alert_background(alert_id: str, analyst_hint: str | None = Non
             # Upsert AlertAnalysis for this alert (avoid unique constraint errors)
             existing = alert.analysis
             if existing:
-                existing.root_cause = ai_response.get("root_cause")
+                existing.root_cause = _normalize_text_field(ai_response.get("root_cause"))
                 existing.confidence_score = ai_response.get("confidence_score")
                 existing.action_plan = _make_json_serializable(ai_response.get("action_plan", []))
                 existing.fix_commands = _make_json_serializable(validated_fix_cmds)
-                existing.prevention_steps = ai_response.get("prevention_steps")
-                existing.risk_level = ai_response.get("risk_level")
+                existing.prevention_steps = _normalize_text_field(ai_response.get("prevention_steps"))
+                existing.risk_level = _normalize_text_field(ai_response.get("risk_level"))
                 existing.ai_provider_used = ai_config.provider
                 existing.ai_model_used = ai_config.model_name
                 existing.tools_called = _make_json_serializable(tools_called)
@@ -402,12 +430,12 @@ async def analyze_alert_background(alert_id: str, analyst_hint: str | None = Non
             else:
                 analysis = AlertAnalysis(
                     alert_id=alert.id,
-                    root_cause=ai_response.get("root_cause"),
+                    root_cause=_normalize_text_field(ai_response.get("root_cause")),
                     confidence_score=ai_response.get("confidence_score"),
                     action_plan=_make_json_serializable(ai_response.get("action_plan", [])),
                     fix_commands=_make_json_serializable(validated_fix_cmds),
-                    prevention_steps=ai_response.get("prevention_steps"),
-                    risk_level=ai_response.get("risk_level"),
+                    prevention_steps=_normalize_text_field(ai_response.get("prevention_steps")),
+                    risk_level=_normalize_text_field(ai_response.get("risk_level")),
                     ai_provider_used=ai_config.provider,
                     ai_model_used=ai_config.model_name,
                     tools_called=_make_json_serializable(tools_called),

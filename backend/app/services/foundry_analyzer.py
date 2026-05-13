@@ -187,21 +187,29 @@ async def analyze_alert_with_foundry(alert_id: str, analyst_hint: str | None = N
                         "requires_approval": cmd.get("requires_approval", True),
                     })
 
-            # prevention_steps may be a list from the AI — flatten to string for VARCHAR column
+            # prevention_steps may be a dict/list from the AI — normalize to string for VARCHAR column
             prevention_raw = ai_response.get("prevention_steps")
             if isinstance(prevention_raw, list):
                 prevention_str = "\n".join(str(s) for s in prevention_raw)
+            elif isinstance(prevention_raw, dict):
+                for key in ("text", "steps", "prevention", "content", "summary"):
+                    if key in prevention_raw:
+                        inner = prevention_raw[key]
+                        prevention_str = "\n".join(str(i) for i in inner) if isinstance(inner, list) else str(inner)
+                        break
+                else:
+                    prevention_str = json.dumps(prevention_raw)
             else:
                 prevention_str = prevention_raw
 
             analysis = AlertAnalysis(
                 alert_id=alert.id,
-                root_cause=ai_response.get("root_cause"),
+                root_cause=ai_response.get("root_cause") if isinstance(ai_response.get("root_cause"), (str, type(None))) else str(ai_response.get("root_cause")),
                 confidence_score=ai_response.get("confidence_score"),
                 action_plan=ai_response.get("action_plan", []),
                 fix_commands=fix_commands,
                 prevention_steps=prevention_str,
-                risk_level=ai_response.get("risk_level"),
+                risk_level=ai_response.get("risk_level") if isinstance(ai_response.get("risk_level"), (str, type(None))) else str(ai_response.get("risk_level")),
                 ai_provider_used="azure_foundry",
                 ai_model_used="foundry-pipeline",
                 tools_called=tools_called,
