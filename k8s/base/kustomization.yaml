@@ -3,7 +3,7 @@ kind: Kustomization
 
 resources:
   - namespace.yaml
-  - secrets.yaml
+  # secrets.yaml is intentionally excluded - manage infraai-secrets directly on the cluster
   - postgres.yaml
   - backend.yaml
   - frontend.yaml
