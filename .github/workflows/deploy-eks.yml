@@ -97,6 +97,12 @@ jobs:
 
       - name: Apply Kubernetes secret from GitHub Secrets
         run: |
+          DB_URL="${{ secrets.DATABASE_URL }}"
+          if [[ "$DB_URL" == *"CHANGE_ME"* ]] || [[ "$DB_URL" == *"infraai-pg"* ]] || [[ -z "$DB_URL" ]]; then
+            echo "⚠️  DATABASE_URL secret looks like a placeholder or is unset — skipping secret apply to protect existing cluster secret."
+            echo "   Please update the DATABASE_URL GitHub Actions secret to: postgresql+asyncpg://pgadmin:ChangeMe123!@postgres:5432/infraaiagent"
+            exit 0
+          fi
           kubectl create secret generic infraai-secrets \
             --namespace infraai \
             --from-literal=DATABASE_URL="${{ secrets.DATABASE_URL }}" \
