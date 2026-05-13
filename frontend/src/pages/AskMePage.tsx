@@ -2,6 +2,19 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { MessageSquare, Send, Plus, Trash2, Loader2, AlertTriangle, Database, Terminal, ShieldCheck, XCircle, Copy, Check, CheckCircle } from 'lucide-react';
 import api from '../api/client';
 
+// Polyfill for crypto.randomUUID — not available on HTTP (non-secure) contexts
+function generateUUID(): string {
+  const fn = (crypto as { randomUUID?: () => string }).randomUUID;
+  if (typeof fn === 'function') {
+    return fn.call(crypto);
+  }
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
 interface ToolCallItem {
   type: 'sql' | 'ssh';
   server_name: string;
@@ -103,7 +116,7 @@ export default function AskMePage() {
 
       // Replace temp message + add assistant reply
       const assistantMsg: ChatMessage = {
-        id: crypto.randomUUID(),
+        id: generateUUID(),
         role: 'assistant',
         content: message,
         metadata_json: metadata_json || {},
@@ -112,7 +125,7 @@ export default function AskMePage() {
 
       setMessages(prev => [
         ...prev.filter(m => m.id !== 'temp'),
-        { ...tempMsg, id: crypto.randomUUID() },
+        { ...tempMsg, id: generateUUID() },
         assistantMsg,
       ]);
 
@@ -129,7 +142,7 @@ export default function AskMePage() {
       const errorMsg = err instanceof Error ? err.message : 'Failed to send message';
       setMessages(prev => [
         ...prev.filter(m => m.id !== 'temp'),
-        { ...tempMsg, id: crypto.randomUUID() },
+        { ...tempMsg, id: generateUUID() },
         { id: 'err', role: 'assistant', content: `Error: ${errorMsg}`, created_at: new Date().toISOString() },
       ]);
     } finally {
@@ -154,7 +167,7 @@ export default function AskMePage() {
       setMessages(prev => [
         ...prev,
         {
-          id: crypto.randomUUID(),
+          id: generateUUID(),
           role: 'assistant',
           content: message,
           metadata_json: metadata_json || {},
@@ -177,7 +190,7 @@ export default function AskMePage() {
     setPendingPlan(null);
     setMessages(prev => [
       ...prev,
-      { id: crypto.randomUUID(), role: 'assistant', content: 'Okay, I won\'t run those diagnostics. Feel free to ask anything else.', created_at: new Date().toISOString() },
+      { id: generateUUID(), role: 'assistant', content: 'Okay, I won\'t run those diagnostics. Feel free to ask anything else.', created_at: new Date().toISOString() },
     ]);
   };
 
