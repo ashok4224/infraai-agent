@@ -95,25 +95,6 @@ jobs:
       - name: Update kubeconfig
         run: aws eks update-kubeconfig --region $AWS_REGION --name $CLUSTER_NAME
 
-      - name: Apply Kubernetes secret from GitHub Secrets
-        run: |
-          DB_URL="${{ secrets.DATABASE_URL }}"
-          if [[ "$DB_URL" == *"CHANGE_ME"* ]] || [[ "$DB_URL" == *"infraai-pg"* ]] || [[ -z "$DB_URL" ]]; then
-            echo "⚠️  DATABASE_URL secret looks like a placeholder or is unset — skipping secret apply to protect existing cluster secret."
-            echo "   Please update the DATABASE_URL GitHub Actions secret to: postgresql+asyncpg://pgadmin:ChangeMe123!@postgres:5432/infraaiagent"
-            exit 0
-          fi
-          kubectl create secret generic infraai-secrets \
-            --namespace infraai \
-            --from-literal=DATABASE_URL="${{ secrets.DATABASE_URL }}" \
-            --from-literal=SECRET_KEY="${{ secrets.SECRET_KEY }}" \
-            --from-literal=ADMIN_PASSWORD="${{ secrets.ADMIN_PASSWORD }}" \
-            --from-literal=AZURE_TENANT_ID="${{ secrets.AZURE_TENANT_ID }}" \
-            --from-literal=AZURE_CLIENT_ID="${{ secrets.AZURE_CLIENT_ID }}" \
-            --from-literal=AZURE_CLIENT_SECRET="${{ secrets.AZURE_CLIENT_SECRET }}" \
-            --from-literal=AZURE_AI_FOUNDRY_KEY="${{ secrets.AZURE_AI_FOUNDRY_KEY }}" \
-            --dry-run=client -o yaml | kubectl apply -f -
-
       - name: Apply K8s manifests
         run: kubectl kustomize --load-restrictor=LoadRestrictionsNone k8s/overlays/eks/ | kubectl apply -f -
 
