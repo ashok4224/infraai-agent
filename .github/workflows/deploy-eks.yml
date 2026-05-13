@@ -95,19 +95,6 @@ jobs:
       - name: Update kubeconfig
         run: aws eks update-kubeconfig --region $AWS_REGION --name $CLUSTER_NAME
 
-      - name: Apply Kubernetes secret from GitHub Secrets
-        run: |
-          kubectl create secret generic infraai-secrets \
-            --namespace infraai \
-            --from-literal=DATABASE_URL="${{ secrets.DATABASE_URL }}" \
-            --from-literal=SECRET_KEY="${{ secrets.SECRET_KEY }}" \
-            --from-literal=ADMIN_PASSWORD="${{ secrets.ADMIN_PASSWORD }}" \
-            --from-literal=AZURE_TENANT_ID="${{ secrets.AZURE_TENANT_ID }}" \
-            --from-literal=AZURE_CLIENT_ID="${{ secrets.AZURE_CLIENT_ID }}" \
-            --from-literal=AZURE_CLIENT_SECRET="${{ secrets.AZURE_CLIENT_SECRET }}" \
-            --from-literal=AZURE_AI_FOUNDRY_KEY="${{ secrets.AZURE_AI_FOUNDRY_KEY }}" \
-            --dry-run=client -o yaml | kubectl apply -f -
-
       - name: Apply K8s manifests
         run: kubectl kustomize --load-restrictor=LoadRestrictionsNone k8s/overlays/eks/ | kubectl apply -f -
 
