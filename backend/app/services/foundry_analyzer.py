@@ -187,13 +187,20 @@ async def analyze_alert_with_foundry(alert_id: str, analyst_hint: str | None = N
                         "requires_approval": cmd.get("requires_approval", True),
                     })
 
+            # prevention_steps may be a list from the AI — flatten to string for VARCHAR column
+            prevention_raw = ai_response.get("prevention_steps")
+            if isinstance(prevention_raw, list):
+                prevention_str = "\n".join(str(s) for s in prevention_raw)
+            else:
+                prevention_str = prevention_raw
+
             analysis = AlertAnalysis(
                 alert_id=alert.id,
                 root_cause=ai_response.get("root_cause"),
                 confidence_score=ai_response.get("confidence_score"),
                 action_plan=ai_response.get("action_plan", []),
                 fix_commands=fix_commands,
-                prevention_steps=ai_response.get("prevention_steps"),
+                prevention_steps=prevention_str,
                 risk_level=ai_response.get("risk_level"),
                 ai_provider_used="azure_foundry",
                 ai_model_used="foundry-pipeline",

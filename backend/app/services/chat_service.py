@@ -671,8 +671,8 @@ async def _chat_with_foundry(
         if not chat_agent or not chat_agent.foundry_agent_name:
             return "Azure AI Foundry chat agent is not configured. Please set it up in Foundry Configuration.", {}
 
-        # Build messages for the agent
-        messages = []
+        # Build messages for the agent — include system prompt + history
+        messages = [{"role": "system", "content": _CHAT_SYSTEM_PROMPT}]
         if context_parts:
             messages.append({"role": "user", "content": "\n".join(context_parts)})
         for msg in history:

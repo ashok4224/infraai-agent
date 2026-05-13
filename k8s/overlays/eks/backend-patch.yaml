@@ -31,3 +31,48 @@ spec:
               value: "dev"
             - name: CORS_ORIGINS
               value: "*"
+            - name: AZURE_AI_FOUNDRY_ENDPOINT
+              value: "https://winfo-infra-agent-resource.services.ai.azure.com/api/projects/infra-agent"
+            - name: AZURE_AI_FOUNDRY_PROJECT
+              value: "infra-agent"
+            - name: AZURE_AI_FOUNDRY_MODEL_DEPLOYMENT
+              value: "gpt-4o"
+            - name: AZURE_TENANT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: infraai-secrets
+                  key: AZURE_TENANT_ID
+            - name: AZURE_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: infraai-secrets
+                  key: AZURE_CLIENT_ID
+            - name: AZURE_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: infraai-secrets
+                  key: AZURE_CLIENT_SECRET
+            - name: AZURE_AI_FOUNDRY_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: infraai-secrets
+                  key: AZURE_AI_FOUNDRY_KEY
+            - name: AZURE_OUTLOOK_SENDER
+              value: "noreply@winfosolutions.com"
+          volumeMounts:
+            - name: foundry-patch
+              mountPath: /app/app/services/azure_foundry_service.py
+              subPath: azure_foundry_service.py
+            - name: foundry-patch
+              mountPath: /app/app/config.py
+              subPath: config.py
+            - name: foundry-patch
+              mountPath: /app/app/services/foundry_analyzer.py
+              subPath: foundry_analyzer.py
+            - name: foundry-patch
+              mountPath: /app/app/services/chat_service.py
+              subPath: chat_service.py
+      volumes:
+        - name: foundry-patch
+          configMap:
+            name: foundry-service-patch
