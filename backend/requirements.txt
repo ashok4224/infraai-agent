@@ -28,7 +28,7 @@ azure-storage-blob>=12.19.0
 azure-mgmt-compute>=33.0.0
 azure-mgmt-monitor>=6.0.0
 azure-mgmt-containerservice>=31.0.0
-azure-mgmt-sql>=4.0.0
+azure-mgmt-sql>=3.0.1
 azure-mgmt-web>=7.3.0
 azure-mgmt-network>=26.0.0
 # AWS SDK (for AWS MCP server)
