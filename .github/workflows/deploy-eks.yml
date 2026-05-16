@@ -60,8 +60,6 @@ jobs:
           tags: |
             ${{ env.ECR_REGISTRY }}/infraai/backend:latest
             ${{ env.ECR_REGISTRY }}/infraai/backend:${{ github.sha }}
-          cache-from: type=registry,ref=${{ env.ECR_REGISTRY }}/infraai/backend:latest
-          cache-to: type=inline
 
       - name: Build and push Frontend
         if: ${{ github.event.inputs.component == 'all' || github.event.inputs.component == 'frontend' || github.event_name == 'push' }}
@@ -75,8 +73,6 @@ jobs:
           tags: |
             ${{ env.ECR_REGISTRY }}/infraai/frontend:latest
             ${{ env.ECR_REGISTRY }}/infraai/frontend:${{ github.sha }}
-          cache-from: type=registry,ref=${{ env.ECR_REGISTRY }}/infraai/frontend:latest
-          cache-to: type=inline
 
   deploy-to-eks:
     needs: build-and-push

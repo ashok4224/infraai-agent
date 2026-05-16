@@ -1,8 +1,9 @@
 FROM python:3.12-slim
 
-# Install system deps + JDK for SQLcl MCP
+# Install system deps + JDK for SQLcl MCP + build tools for Python drivers
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl unzip default-jre-headless && \
+    curl unzip default-jre-headless \
+    build-essential libpq-dev && \
     rm -rf /var/lib/apt/lists/*
 
 # Install Oracle SQLcl (latest - has native MCP support)
