@@ -1,8 +1,8 @@
-"""Foundry analyzer — Azure AI Foundry multi-agent analysis pipeline.
+"""Foundry analyzer ??? Azure AI Foundry multi-agent analysis pipeline.
 
 This module is completely independent from the built-in alert_analyzer.py.
 It reads the agent pipeline dynamically from foundry_agent_configs and
-orchestrates: knowledge → researcher → collector → solver → notifier(s).
+orchestrates: knowledge ??? researcher ??? collector ??? solver ??? notifier(s).
 """
 import json
 import logging
@@ -34,7 +34,7 @@ async def analyze_alert_with_foundry(alert_id: str, analyst_hint: str | None = N
             alert.analysis_status = "analyzing"
             await db.commit()
 
-            # ── Load the agent pipeline from the registry ──
+            # ?????? Load the agent pipeline from the registry ??????
             pipeline_result = await db.execute(
                 select(FoundryAgentConfig)
                 .where(FoundryAgentConfig.is_active == True)
@@ -43,20 +43,20 @@ async def analyze_alert_with_foundry(alert_id: str, analyst_hint: str | None = N
             all_agents = pipeline_result.scalars().all()
 
             if not all_agents:
-                logger.error("No Foundry agents configured — cannot analyze alert %s", alert_id)
+                logger.error("No Foundry agents configured ??? cannot analyze alert %s", alert_id)
                 alert.analysis_status = "failed"
                 await db.commit()
                 return
 
-            # ── Filter agents relevant to this alert ──
+            # ?????? Filter agents relevant to this alert ??????
             alert_category = (alert.alert_category or "general").lower()
             workflow_pipeline, matched_specialists = _filter_pipeline(all_agents, alert_category, alert)
 
-            # ── Determine system type from the pipeline agents ──
+            # ?????? Determine system type from the pipeline agents ??????
             # Use the most specific system_type from matched agents (not "all")
             system_type = _resolve_system_type(matched_specialists + workflow_pipeline, alert)
 
-            # ── Execute pipeline steps ──
+            # ?????? Execute pipeline steps ??????
             context = {
                 "alert": _alert_to_context(alert),
                 "analyst_hint": redact_text(analyst_hint) if analyst_hint else None,
@@ -81,9 +81,9 @@ async def analyze_alert_with_foundry(alert_id: str, analyst_hint: str | None = N
             pipeline_trace = []
             specialists_ran = False
 
-            # ── Standard optimizations (apply to ALL severities) ──
-            # 1. intake is skipped when triage_master is present — triage does the same classification
-            # 2. collector runs tools-only (Python executes SQL/SSH) — no extra LLM interpreter call
+            # ?????? Standard optimizations (apply to ALL severities) ??????
+            # 1. intake is skipped when triage_master is present ??? triage does the same classification
+            # 2. collector runs tools-only (Python executes SQL/SSH) ??? no extra LLM interpreter call
             has_triage = any(a.role == "triage_master" for a in workflow_pipeline)
 
             for agent_config in workflow_pipeline:
@@ -98,9 +98,9 @@ async def analyze_alert_with_foundry(alert_id: str, analyst_hint: str | None = N
                         logger.warning("Required agent %s has no Foundry agent name", agent_config.agent_name)
                         continue
 
-                # Optimization 1: skip intake — triage_master covers classification for all alerts
+                # Optimization 1: skip intake ??? triage_master covers classification for all alerts
                 if role == "intake" and has_triage:
-                    logger.debug("Skipping intake — triage_master will classify")
+                    logger.debug("Skipping intake ??? triage_master will classify")
                     pipeline_trace.append({"agent": agent_config.agent_name, "role": role, "status": "skipped", "reason": "merged into triage"})
                     continue
 
@@ -179,7 +179,7 @@ async def analyze_alert_with_foundry(alert_id: str, analyst_hint: str | None = N
                     if not agent_config.is_optional:
                         pass
 
-            # ── Parse and save analysis ──
+            # ?????? Parse and save analysis ??????
             solver_text = context.get("analysis_result") or ""
             ai_response = _parse_solver_response(solver_text)
             ai_response["pipeline_trace"] = pipeline_trace
@@ -200,7 +200,7 @@ async def analyze_alert_with_foundry(alert_id: str, analyst_hint: str | None = N
                         "requires_approval": cmd.get("requires_approval", True),
                     })
 
-            # prevention_steps may be a dict/list from the AI — normalize to string for VARCHAR column
+            # prevention_steps may be a dict/list from the AI ??? normalize to string for VARCHAR column
             prevention_raw = ai_response.get("prevention_steps")
             if isinstance(prevention_raw, list):
                 prevention_str = "\n".join(str(s) for s in prevention_raw)
@@ -256,7 +256,7 @@ async def analyze_alert_with_foundry(alert_id: str, analyst_hint: str | None = N
                 pass
 
 
-# ── Pipeline Step Implementations ──
+# ?????? Pipeline Step Implementations ??????
 
 
 async def _run_intake_step(context: dict, agent_id: str) -> str:
@@ -319,7 +319,7 @@ async def _run_knowledge_step(alert: Alert, agent_config: FoundryAgentConfig) ->
 
     The agent has the file_search tool enabled with the infraai-knowledge-store
     vector store attached.  Azure AI Foundry handles chunking, embedding, and
-    semantic search natively — no external services needed.
+    semantic search natively ??? no external services needed.
 
     Falls back to direct Azure AI Search / SharePoint search if the agent call fails.
     """
@@ -328,7 +328,7 @@ async def _run_knowledge_step(alert: Alert, agent_config: FoundryAgentConfig) ->
     agent_id = agent_config.foundry_agent_name
     query = f"{alert.alertname} {alert.alert_category or ''} {alert.summary or ''}".strip()
 
-    # ── Primary: call the Foundry knowledge agent (uses built-in file_search) ──
+    # ?????? Primary: call the Foundry knowledge agent (uses built-in file_search) ??????
     if agent_id:
         try:
             prompt = (
@@ -346,7 +346,7 @@ async def _run_knowledge_step(alert: Alert, agent_config: FoundryAgentConfig) ->
         except Exception as e:
             logger.warning("infraai-knowledge agent call failed, falling back to direct search: %s", e)
 
-    # ── Fallback: direct search (Azure AI Search + SharePoint + RAG pgvector) ──
+    # ?????? Fallback: direct search (Azure AI Search + SharePoint + RAG pgvector) ??????
     from app.services.azure_graph_service import search_sharepoint, search_ai_index
     docs = []
 
@@ -368,39 +368,8 @@ async def _run_knowledge_step(alert: Alert, agent_config: FoundryAgentConfig) ->
     ai_docs = await search_ai_index(query, max_results=3)
     docs.extend(ai_docs)
 
-    # Try Foundry live SharePoint search via the infraai-knowledge agent
-    # if the Foundry endpoint is configured. This avoids using Microsoft
-    # Graph API when Foundry has been granted access and the agent has
-    # `sharepoint_grounding` enabled.
-    if settings.AZURE_AI_FOUNDRY_ENDPOINT:
-        try:
-            from app.services.azure_foundry_service import run_agent
-            prompt = (
-                f"Search SharePoint for the following query and return up to 3 items as JSON array"
-                f" with fields title, snippet, url.\nQuery: {query}"
-            )
-            response = await run_agent("infraai-knowledge", [{"role": "user", "content": prompt}], timeout=30.0)
-            if response and response.strip():
-                try:
-                    import json as _json
-                    parsed = _json.loads(response)
-                    if isinstance(parsed, list):
-                        for item in parsed[:3]:
-                            docs.append({
-                                "title": item.get("title", ""),
-                                "snippet": item.get("snippet", item.get("content", ""))[:500],
-                                "url": item.get("url", item.get("webUrl", "")),
-                            })
-                except Exception:
-                    # Non-JSON response — attach as a single synthesized doc
-                    docs.append({"title": "Foundry SharePoint Search", "content": response, "source": "foundry:sharepoint"})
-        except Exception as e:
-            logger.debug("Foundry live SharePoint search failed: %s", e)
-
-    # Fallback: direct search via AI Search + Graph API (if Foundry path produced no docs)
-    if not docs:
-        sp_docs = await search_sharepoint(query, max_results=3)
-        docs.extend(sp_docs)
+    sp_docs = await search_sharepoint(query, max_results=3)
+    docs.extend(sp_docs)
 
     return docs[:5]
 
@@ -476,7 +445,7 @@ async def _run_researcher_step(context: dict, agent_id: str) -> str:
     msg_parts.append("FORMAT: Return SQL queries in ```sql code blocks and OS commands in ```bash code blocks.")
 
     if context.get("analyst_hint"):
-        msg_parts.insert(0, f"⚠️ ANALYST GUIDANCE (highest priority): {context['analyst_hint']}")
+        msg_parts.insert(0, f"?????? ANALYST GUIDANCE (highest priority): {context['analyst_hint']}")
 
     if context.get("knowledge_docs"):
         msg_parts.append("\nRelevant knowledge base documents:")
@@ -493,7 +462,7 @@ async def _run_collector_step(
     context: dict,
     alert: Alert,
 ) -> tuple[dict, list]:
-    """Execute diagnostic data collection — SQL via MCP AND OS via SSH.
+    """Execute diagnostic data collection ??? SQL via MCP AND OS via SSH.
 
     Cross-domain: always attempts both database and OS diagnostics when
     the relevant infrastructure is configured, regardless of alert type.
@@ -502,7 +471,7 @@ async def _run_collector_step(
     calls = []
     system_type = context.get("system_type", "general")
 
-    # ── Database diagnostics via MCP ──
+    # ?????? Database diagnostics via MCP ??????
     mcp_result = await db.execute(
         select(MCPServerConfig).where(MCPServerConfig.is_active == True)
     )
@@ -530,7 +499,7 @@ async def _run_collector_step(
                 except Exception as e:
                     collected[f"{mcp.name}_{qname}_error"] = str(e)
 
-    # ── OS diagnostics via SSH (cross-domain) ──
+    # ?????? OS diagnostics via SSH (cross-domain) ??????
     from app.models.server_config import ServerConfig
     from app.services.ssh_service import run_ssh_command
 
@@ -545,7 +514,7 @@ async def _run_collector_step(
         os_commands = _extract_os_commands_from_plan(diagnostic_plan)
 
         if not os_commands:
-            # Default OS diagnostics — always useful for cross-domain analysis
+            # Default OS diagnostics ??? always useful for cross-domain analysis
             os_commands = [
                 ("disk_usage", "df -h"),
                 ("memory_usage", "free -h"),
@@ -569,38 +538,6 @@ async def _run_collector_step(
                     ("mysql_data_disk", "du -sh /var/lib/mysql/* 2>/dev/null | sort -rh | head -15"),
                     ("mysql_processes", "ps aux | grep -i '[m]ysql' | head -20"),
                 ])
-            elif system_type in ("aws", "azure", "cloud", "kubernetes"):
-                os_commands.extend([
-                    ("disk_usage", "df -h"),
-                    ("memory_usage", "free -h"),
-                    ("cpu_load", "uptime"),
-                ])
-
-        # ── Cloud diagnostics via MCP ──
-        if system_type in ("aws", "azure", "kubernetes"):
-            for mcp in mcps:
-                mcp_type = (mcp.server_type or "").lower()
-                if mcp_type == system_type:
-                    try:
-                        tool_name = f"{system_type}_exec"
-                        tool_params = {"config_id": str(mcp.id)}
-                        if system_type == "aws":
-                            tool_params.update({"service": "ec2", "operation": "describe_instances"})
-                        elif system_type == "azure":
-                            rg = (mcp.env_vars or {}).get("AZURE_RESOURCE_GROUP", "")
-                            tool_params.update({"service": "compute", "operation": "list", "resource_group": rg})
-                        elif system_type == "kubernetes":
-                            tool_params.update({"verb": "get", "resource": "nodes"})
-
-                        data = await execute_tool(tool_name, tool_params)
-                        collected[f"{mcp.name}_{system_type}"] = data
-                        calls.append({
-                            "tool": tool_name,
-                            "server": mcp.name,
-                            "system_type": system_type,
-                        })
-                    except Exception as e:
-                        collected[f"{mcp.name}_{system_type}_error"] = str(e)
 
         matched_server = _match_ssh_server(all_servers, alert)
         if matched_server:
@@ -636,7 +573,7 @@ async def _run_solver_step(context: dict, agent_id: str) -> str:
     ]
 
     if context.get("analyst_hint"):
-        parts.insert(0, f"⚠️ ANALYST GUIDANCE: {context['analyst_hint']}")
+        parts.insert(0, f"?????? ANALYST GUIDANCE: {context['analyst_hint']}")
 
     if context.get("knowledge_docs"):
         parts.append("\n## Knowledge Base Context:")
@@ -665,21 +602,21 @@ async def _run_solver_step(context: dict, agent_id: str) -> str:
 
     # Platform-specific fix_commands constraints
     if system_type in ("oracle", "sqlcl"):
-        parts.append("\nIMPORTANT — ORACLE DATABASE: Use type=\"sql\" for Oracle SQL commands (ALTER TABLESPACE, PURGE, etc.) and type=\"os\" for OS-level operations related to Oracle (e.g., clearing audit/trace files). Use Oracle-specific syntax.")
+        parts.append("\nIMPORTANT ??? ORACLE DATABASE: Use type=\"sql\" for Oracle SQL commands (ALTER TABLESPACE, PURGE, etc.) and type=\"os\" for OS-level operations related to Oracle (e.g., clearing audit/trace files). Use Oracle-specific syntax.")
     elif system_type == "postgresql":
-        parts.append("\nIMPORTANT — POSTGRESQL: Use type=\"sql\" for PostgreSQL commands (VACUUM, REINDEX, ALTER, pg_terminate_backend, etc.). Use PostgreSQL syntax — NOT Oracle syntax.")
+        parts.append("\nIMPORTANT ??? POSTGRESQL: Use type=\"sql\" for PostgreSQL commands (VACUUM, REINDEX, ALTER, pg_terminate_backend, etc.). Use PostgreSQL syntax ??? NOT Oracle syntax.")
     elif system_type == "mysql":
-        parts.append("\nIMPORTANT — MYSQL: Use type=\"sql\" for MySQL commands (OPTIMIZE TABLE, KILL, SET GLOBAL, etc.). Use MySQL syntax.")
+        parts.append("\nIMPORTANT ??? MYSQL: Use type=\"sql\" for MySQL commands (OPTIMIZE TABLE, KILL, SET GLOBAL, etc.). Use MySQL syntax.")
     elif system_type == "sqlserver":
-        parts.append("\nIMPORTANT — SQL SERVER: Use type=\"sql\" for T-SQL commands (DBCC, ALTER DATABASE, KILL, sp_configure, etc.). Use T-SQL syntax.")
+        parts.append("\nIMPORTANT ??? SQL SERVER: Use type=\"sql\" for T-SQL commands (DBCC, ALTER DATABASE, KILL, sp_configure, etc.). Use T-SQL syntax.")
     elif system_type in ("os", "linux", "aws", "azure", "cloud", "kubernetes", "infrastructure"):
-        parts.append("\nCRITICAL — OS/INFRASTRUCTURE ALERT: Only provide fix_commands with type=\"bash\". Do NOT suggest any SQL or database commands. All commands must be standard shell commands.")
+        parts.append("\nCRITICAL ??? OS/INFRASTRUCTURE ALERT: Only provide fix_commands with type=\"bash\". Do NOT suggest any SQL or database commands. All commands must be standard shell commands.")
     elif system_type == "network":
-        parts.append("\nIMPORTANT — NETWORK ALERT: Use type=\"bash\" for all diagnostic and remediation commands (ip, iptables, ss, dig, curl, openssl). Do NOT suggest SQL commands.")
+        parts.append("\nIMPORTANT ??? NETWORK ALERT: Use type=\"bash\" for all diagnostic and remediation commands (ip, iptables, ss, dig, curl, openssl). Do NOT suggest SQL commands.")
     elif system_type == "security":
-        parts.append("\nIMPORTANT — SECURITY ALERT: Prioritize containment actions before remediation. Use type=\"bash\" for OS-level commands. Flag any command that could destroy forensic evidence.")
+        parts.append("\nIMPORTANT ??? SECURITY ALERT: Prioritize containment actions before remediation. Use type=\"bash\" for OS-level commands. Flag any command that could destroy forensic evidence.")
     elif system_type == "application":
-        parts.append("\nIMPORTANT — APPLICATION ALERT: Use type=\"bash\" for process/service commands, type=\"kubectl\" for K8s-based app commands. Correlate with recent deployments and config changes.")
+        parts.append("\nIMPORTANT ??? APPLICATION ALERT: Use type=\"bash\" for process/service commands, type=\"kubectl\" for K8s-based app commands. Correlate with recent deployments and config changes.")
 
     parts.append(
         "\nRespond with JSON: {problem_statement, root_cause, confidence_score, "
@@ -821,7 +758,7 @@ async def _run_notifier_step(
     subject = f"[InfraAI] {parsed.get('risk_level', 'Alert')}: {alert.alertname}"
     html_body = _build_email_html(alert, parsed)
 
-    # ── Dual-path: try Foundry notifier agent first ──
+    # ?????? Dual-path: try Foundry notifier agent first ??????
     if agent_config.foundry_agent_name:
         try:
             from app.services.azure_foundry_service import run_agent
@@ -847,7 +784,7 @@ async def _run_notifier_step(
                 "Foundry notifier agent failed, falling back to Graph API: %s", e
             )
 
-    # ── Fallback: direct Graph API email ──
+    # ?????? Fallback: direct Graph API email ??????
     from app.services.azure_graph_service import send_outlook_email
 
     result = await send_outlook_email(
@@ -859,7 +796,7 @@ async def _run_notifier_step(
     return result
 
 
-# ── Helpers ──
+# ?????? Helpers ??????
 
 
 def _alert_to_context(alert: Alert) -> dict:

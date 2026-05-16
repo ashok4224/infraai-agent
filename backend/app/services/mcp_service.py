@@ -51,7 +51,9 @@ class MCPClient:
         env = dict(self.config.env_vars) if self.config.env_vars else {}
         conn_str = self._build_oracle_conn_string()
 
-        if (self.config.server_type or "").lower() in ("sqlcl", "oracle"):
+        server_type = (self.config.server_type or "").lower()
+
+        if server_type in ("sqlcl", "oracle"):
             # Use the bundled SQLcl binary in MCP mode
             import shutil
             sql_bin = shutil.which("sql") or "/opt/sqlcl/bin/sql"
@@ -59,6 +61,14 @@ class MCPClient:
             args = ["-mcp"]
             if conn_str:
                 args.append(conn_str)
+        elif server_type in ("aws", "azure", "kubernetes"):
+            # Cloud MCP servers — use Python-based MCP scripts
+            # These are small Python files that speak JSON-RPC over stdin/stdout
+            # wrapping boto3 (AWS), azure-mgmt (Azure), or subprocess.run("kubectl")
+            import shutil
+            python_bin = shutil.which("python") or shutil.which("python3") or "python"
+            cmd = python_bin
+            args = ["-m", f"app.services.foundry_tools.{server_type}_mcp_server"]
         else:
             cmd = self.config.command
             args = self.config.args or []

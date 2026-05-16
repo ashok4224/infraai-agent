@@ -23,7 +23,7 @@ _project_client = None
 _openai_client = None
 _agent_reference_available = None  # None=unknown, True=available, False=not available
 
-# Cache: agent name → asst_* ID (populated lazily)
+# Cache: agent name ??? asst_* ID (populated lazily)
 _assistant_id_cache: dict[str, str] = {}
 
 
@@ -155,7 +155,7 @@ def _get_agents_bearer_token() -> str:
     """Get a bearer token for the Azure AI agents API using ClientSecretCredential.
 
     The Agents API requires AAD bearer token with scope https://ai.azure.com/.default.
-    API key auth (api-key header) does NOT grant agents permissions — RBAC role
+    API key auth (api-key header) does NOT grant agents permissions ??? RBAC role
     'Azure AI User' on the Foundry resource is required for the service principal.
     """
     import time
@@ -220,8 +220,8 @@ async def _ensure_assistant_id(agent_name: str) -> str | None:
 async def _run_via_threads(agent_name: str, messages: list[dict], timeout: float) -> str:
     """Run a Foundry agent via the OpenAI Assistants Threads API (API key auth).
 
-    Flow: create thread → add messages → create run → poll until complete
-          → extract assistant reply → delete thread.
+    Flow: create thread ??? add messages ??? create run ??? poll until complete
+          ??? extract assistant reply ??? delete thread.
     """
     import httpx
 
@@ -241,7 +241,7 @@ async def _run_via_threads(agent_name: str, messages: list[dict], timeout: float
         logger.debug("Created thread %s for agent %s", thread_id, agent_name)
 
         try:
-            # 2. Add user/assistant messages (skip system — that's in the agent instructions)
+            # 2. Add user/assistant messages (skip system ??? that's in the agent instructions)
             for msg in messages:
                 role = msg.get("role", "")
                 if role in ("user", "assistant"):
@@ -316,24 +316,24 @@ async def run_agent(agent_id: str, messages: list[dict], timeout: float = 120.0)
     """Run a Foundry agent by name (foundry_agent_name from DB).
 
     When AZURE_AI_FOUNDRY_KEY is set:
-      → Uses the OpenAI Assistants Threads API to invoke the named agent.
-      → Falls back to direct Chat Completions only if the Threads call fails.
+      ??? Uses the OpenAI Assistants Threads API to invoke the named agent.
+      ??? Falls back to direct Chat Completions only if the Threads call fails.
     When using managed identity / service principal:
-      → Uses the Conversations + Responses API (v2 SDK pattern).
+      ??? Uses the Conversations + Responses API (v2 SDK pattern).
     """
     global _agent_reference_available
 
-    # Primary path: API key set → use Assistants Threads API (asst_* agents)
+    # Primary path: API key set ??? use Assistants Threads API (asst_* agents)
     if settings.AZURE_AI_FOUNDRY_KEY:
         try:
             logger.debug("Using Assistants Threads API for agent %s", agent_id)
             return await _run_via_threads(agent_id, messages, timeout=timeout)
         except (ValueError, RuntimeError, TimeoutError) as e:
             # ValueError = agent not found in Foundry; don't silently swallow
-            logger.error("Threads API failed for agent %s: %s — falling back to direct completion", agent_id, e)
+            logger.error("Threads API failed for agent %s: %s ??? falling back to direct completion", agent_id, e)
             return await _run_chat_completion(messages, timeout=timeout)
         except Exception as e:
-            logger.warning("Threads API unexpected error for agent %s: %s — falling back", agent_id, e)
+            logger.warning("Threads API unexpected error for agent %s: %s ??? falling back", agent_id, e)
             return await _run_chat_completion(messages, timeout=timeout)
 
     _, openai_client = await _ensure_clients()
@@ -419,9 +419,9 @@ async def run_agent(agent_id: str, messages: list[dict], timeout: float = 120.0)
 # -- Knowledge Base: Files API + Vector Stores --------------------------------
 #
 # Azure AI Foundry has a fully managed knowledge pipeline built in:
-#   1. Files API  — upload documents (PDF, MD, TXT, DOCX, …)
-#   2. Vector Stores — Foundry auto-chunks + auto-embeds the files
-#   3. file_search tool — attach vector store to an agent; it searches natively
+#   1. Files API  ??? upload documents (PDF, MD, TXT, DOCX, ???)
+#   2. Vector Stores ??? Foundry auto-chunks + auto-embeds the files
+#   3. file_search tool ??? attach vector store to an agent; it searches natively
 #
 # No Azure Blob Storage, no Azure AI Search, no pgvector required.
 # Everything lives inside the Foundry project endpoint.
@@ -457,7 +457,7 @@ async def upload_file_to_foundry(filename: str, content_bytes: bytes) -> str:
         )
         r.raise_for_status()
         file_id = r.json()["id"]
-        logger.info("Uploaded file '%s' to Foundry → %s", filename, file_id)
+        logger.info("Uploaded file '%s' to Foundry ??? %s", filename, file_id)
         return file_id
 
 
@@ -555,7 +555,7 @@ async def setup_knowledge_agent_file_search(knowledge_agent_name: str = "infraai
     """Enable file_search tool on the infraai-knowledge agent and attach the vector store.
 
     Call this once after creating the vector store.  Safe to call multiple
-    times — it is idempotent (PATCH replaces tools/tool_resources).
+    times ??? it is idempotent (PATCH replaces tools/tool_resources).
     """
     import httpx
 
@@ -603,7 +603,7 @@ async def create_sharepoint_connection(
     """Create a SharePoint Online connection in the Foundry project.
 
     This connection is then used by the sharepoint_grounding agent tool so the
-    agent can search SharePoint live — no file-sync or vector-store upload needed.
+    agent can search SharePoint live ??? no file-sync or vector-store upload needed.
 
     Returns {"success": True, "connection_id": "...", "connection_name": "..."}
     """
@@ -629,14 +629,14 @@ async def create_sharepoint_connection(
     }
 
     async with httpx.AsyncClient(timeout=30.0) as http:
-        # Try to create; if 409 Conflict, connection already exists — fetch it
+        # Try to create; if 409 Conflict, connection already exists ??? fetch it
         r = await http.put(
             f"{base}/connections/{connection_name}?api-version={ver}",
             headers=hdrs,
             json=body,
         )
         if r.status_code == 409:
-            # Already exists — get its ID
+            # Already exists ??? get its ID
             r2 = await http.get(
                 f"{base}/connections/{connection_name}?api-version={ver}",
                 headers=hdrs,
@@ -664,7 +664,7 @@ async def setup_sharepoint_grounding(
     sharepoint_grounding tool so it searches SharePoint live on every query.
 
     Also keeps file_search so uploaded files still work.
-    Idempotent — safe to call multiple times.
+    Idempotent ??? safe to call multiple times.
     """
     import httpx
 

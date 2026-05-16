@@ -37,6 +37,219 @@ async def get_graph_client():
     return _graph_client
 
 
+# ── AzureGraphService class (used by knowledge_connectors.SharePointConnector) ──
+
+
+class AzureGraphService:
+    """Service for interacting with Microsoft Graph API for SharePoint operations."""
+
+    def __init__(self):
+        self._client = None
+        self._use_httpx_fallback = False  # set True if msgraph SDK fails
+
+    async def _get_client(self):
+        if self._client is None:
+            from app.services.azure_graph_service import get_graph_client
+            self._client = await get_graph_client()
+        return self._client
+
+    async def _get_token(self) -> str:
+        """Get an access token for direct REST calls (fallback path)."""
+        from azure.identity import ClientSecretCredential
+        if settings.AZURE_CLIENT_ID and settings.AZURE_CLIENT_SECRET and settings.AZURE_TENANT_ID:
+            cred = ClientSecretCredential(
+                tenant_id=settings.AZURE_TENANT_ID,
+                client_id=settings.AZURE_CLIENT_ID,
+                client_secret=settings.AZURE_CLIENT_SECRET,
+            )
+            token = cred.get_token("https://graph.microsoft.com/.default")
+            return token.token
+        return ""
+
+    async def get_site_info(self, site_id: str) -> dict:
+        """Get SharePoint site information."""
+        client = await self._get_client()
+        result = await client.sites.by_site_id(site_id).get()
+        return {"id": result.id, "display_name": result.display_name, "web_url": result.web_url}
+
+    async def _get_drive_items_via_rest(self, site_id: str, folder_path: str) -> list[dict]:
+        """Fallback: use direct REST API to list drive items."""
+        import httpx
+        token = await self._get_token()
+        if not token:
+            return []
+
+        headers = {"Authorization": f"Bearer {token}"}
+        site_encoded = site_id.replace(":", "%3A").replace("@", "%40")
+        items = []
+
+        async with httpx.AsyncClient(timeout=15) as client:
+            # Get drives
+            resp = await client.get(
+                f"https://graph.microsoft.com/v1.0/sites/{site_encoded}/drives",
+                headers=headers
+            )
+            if resp.status_code != 200:
+                logger.warning("Failed to list drives: %s", resp.status_code)
+                return []
+            drives = resp.json().get("value", [])
+
+            for drive in drives:
+                path_parts = [p for p in folder_path.strip("/").split("/") if p]
+                current_path = f"/drives/{drive['id']}/root"
+                
+                for part in path_parts:
+                    children_resp = await client.get(
+                        f"https://graph.microsoft.com/v1.0/sites/{site_encoded}{current_path}/children",
+                        headers=headers
+                    )
+                    if children_resp.status_code != 200:
+                        break
+                    children = children_resp.json().get("value", [])
+                    found = False
+                    for child in children:
+                        if child.get("name") == part and child.get("folder"):
+                            current_path = f"/drives/{drive['id']}/items/{child['id']}"
+                            found = True
+                            break
+                    if not found:
+                        break
+                else:
+                    # All folder parts found — list children
+                    children_resp = await client.get(
+                        f"https://graph.microsoft.com/v1.0/sites/{site_encoded}{current_path}/children",
+                        headers=headers
+                    )
+                    if children_resp.status_code == 200:
+                        for child in children_resp.json().get("value", []):
+                            items.append({
+                                "id": child["id"],
+                                "name": child.get("name", ""),
+                                "size": child.get("size", 0),
+                                "webUrl": child.get("webUrl", ""),
+                                "drive_id": drive["id"],
+                                "folder": bool(child.get("folder")),
+                            })
+        return items
+
+    async def list_drive_items(self, site_id: str, doc_libraries: list[str] = None, folder_paths: list[str] = None) -> list[dict]:
+        """List items from SharePoint document libraries."""
+        client = await self._get_client()
+        items = []
+
+        try:
+            drives = await client.sites.by_site_id(site_id).drives.get()
+        except Exception as e:
+            logger.warning("msgraph SDK failed for list_drive_items, trying fallback: %s", e)
+            drives = type("obj", (), {"value": None})()
+
+        if not drives or not drives.value:
+            # Fallback to REST API
+            if folder_paths:
+                for fp in folder_paths:
+                    rest_items = await self._get_drive_items_via_rest(site_id, fp)
+                    items.extend(rest_items)
+            return items
+
+        for drive in drives.value:
+            if doc_libraries and drive.name not in doc_libraries:
+                continue
+
+            if folder_paths:
+                for folder_path in folder_paths:
+                    path_parts = [p for p in folder_path.strip("/").split("/") if p]
+                    try:
+                        current_items = await client.drives.by_drive_id(drive.id).root.children.get()
+                    except Exception:
+                        continue
+
+                    for part in path_parts:
+                        found = False
+                        if current_items and current_items.value:
+                            for child in current_items.value:
+                                if child.name == part and child.folder:
+                                    try:
+                                        current_items = await client.drives.by_drive_id(drive.id).items.by_drive_item_id(child.id).children.get()
+                                    except Exception:
+                                        break
+                                    found = True
+                                    break
+                        if not found:
+                            break
+                    else:
+                        if current_items and current_items.value:
+                            for item in current_items.value:
+                                items.append({
+                                    "id": item.id,
+                                    "name": item.name,
+                                    "size": item.size or 0,
+                                    "webUrl": item.web_url,
+                                    "drive_id": drive.id,
+                                    "folder": bool(item.folder),
+                                })
+            else:
+                try:
+                    root_items = await client.drives.by_drive_id(drive.id).root.children.get()
+                    if root_items and root_items.value:
+                        for item in root_items.value:
+                            items.append({
+                                "id": item.id,
+                                "name": item.name,
+                                "size": item.size or 0,
+                                "webUrl": item.web_url,
+                                "drive_id": drive.id,
+                                "folder": bool(item.folder),
+                            })
+                except Exception:
+                    continue
+        return items
+
+    async def download_drive_item_content(self, item_id: str, site_id: str) -> str:
+        """Download and return the content of a drive item as text."""
+        try:
+            client = await self._get_client()
+            drives = await client.sites.by_site_id(site_id).drives.get()
+            if not drives or not drives.value:
+                return ""
+
+            for drive in drives.value:
+                try:
+                    item = await client.drives.by_drive_id(drive.id).items.by_drive_item_id(item_id).get()
+                    if item:
+                        content_stream = await client.drives.by_drive_id(drive.id).items.by_drive_item_id(item_id).content.get()
+                        if content_stream:
+                            raw = b""
+                            async for chunk in content_stream.stream():
+                                if isinstance(chunk, bytes):
+                                    raw += chunk
+                            return raw.decode("utf-8", errors="replace")
+                except Exception:
+                    continue
+            return ""
+        except Exception as e:
+            logger.warning("download_drive_item_content failed (try fallback): %s", e)
+            # Fallback to REST
+            import httpx
+            token = await self._get_token()
+            if not token:
+                return ""
+            site_encoded = site_id.replace(":", "%3A").replace("@", "%40")
+            async with httpx.AsyncClient(timeout=15) as client:
+                drives_resp = await client.get(
+                    f"https://graph.microsoft.com/v1.0/sites/{site_encoded}/drives",
+                    headers={"Authorization": f"Bearer {token}"}
+                )
+                if drives_resp.status_code == 200:
+                    for drive in drives_resp.json().get("value", []):
+                        resp = await client.get(
+                            f"https://graph.microsoft.com/v1.0/drives/{drive['id']}/items/{item_id}/content",
+                            headers={"Authorization": f"Bearer {token}"}
+                        )
+                        if resp.status_code == 200:
+                            return resp.text
+            return ""
+
+
 async def send_outlook_email(
     to_list: list[str],
     cc_list: list[str],

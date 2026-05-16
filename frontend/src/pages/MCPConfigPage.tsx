@@ -38,6 +38,10 @@ export default function MCPConfigPage() {
     args: '' as string, env_vars: '{}', connection_string: '',
     oracle_host: '', oracle_port: 1521, oracle_service: '', oracle_user: '', oracle_password: '',
     is_active: true,
+    aws_region: '' as string,
+    azure_subscription_id: '' as string,
+    azure_resource_group: '' as string,
+    k8s_namespace: '' as string,
   };
   const [form, setForm] = useState(emptyForm);
 
@@ -71,6 +75,10 @@ export default function MCPConfigPage() {
       oracle_user: s.oracle_user || '',
       oracle_password: '',
       is_active: s.is_active,
+      aws_region: (s.env_vars as any)?.AWS_REGION || '',
+      azure_subscription_id: (s.env_vars as any)?.AZURE_SUBSCRIPTION_ID || '',
+      azure_resource_group: (s.env_vars as any)?.AZURE_RESOURCE_GROUP || '',
+      k8s_namespace: (s.env_vars as any)?.K8S_NAMESPACE || '',
     });
     setTestResult(null);
     setShowModal(true);
@@ -243,6 +251,9 @@ export default function MCPConfigPage() {
                       else if (type === 'postgresql') { port = 5432; cmd = 'npx'; args = '-y @modelcontextprotocol/server-postgres postgresql://USER:PASS@HOST/DBNAME'; }
                       else if (type === 'mysql') { port = 3306; cmd = 'npx'; args = ''; }
                       else if (type === 'sqlserver') { port = 1433; cmd = 'npx'; args = ''; }
+                      else if (type === 'aws') { port = 443; cmd = 'python'; args = '-m app.services.foundry_tools.aws_mcp_server'; }
+                      else if (type === 'azure') { port = 443; cmd = 'python'; args = '-m app.services.foundry_tools.azure_mcp_server'; }
+                      else if (type === 'kubernetes') { port = 443; cmd = 'python'; args = '-m app.services.foundry_tools.kubernetes_mcp_server'; }
 
                       setForm({ ...form, server_type: type, oracle_port: port, command: cmd, args: args });
                     }}
@@ -251,6 +262,9 @@ export default function MCPConfigPage() {
                     <option value="postgresql">PostgreSQL</option>
                     <option value="mysql">MySQL</option>
                     <option value="sqlserver">SQL Server</option>
+                    <option value="aws">AWS (Cloud)</option>
+                    <option value="azure">Azure (Cloud)</option>
+                    <option value="kubernetes">Kubernetes</option>
                     <option value="custom">Custom (Generic MCP)</option>
                   </select>
                 </div>
@@ -274,44 +288,107 @@ export default function MCPConfigPage() {
                 </div>
               </div>
 
-              <div className="border-t pt-3 mt-2">
-                <p className="text-sm font-medium text-gray-700 mb-2">Database Connection</p>
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-xs text-gray-500 mb-1">Host</label>
-                    <input className="input-field" value={form.oracle_host} onChange={(e) => setForm({ ...form, oracle_host: e.target.value })} placeholder="db-server-01" />
+              {/* DB Connection — hidden for cloud types */}
+              {!['aws','azure','kubernetes'].includes(form.server_type) && (
+                <div className="border-t pt-3 mt-2">
+                  <p className="text-sm font-medium text-gray-700 mb-2">Database Connection</p>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs text-gray-500 mb-1">Host</label>
+                      <input className="input-field" value={form.oracle_host} onChange={(e) => setForm({ ...form, oracle_host: e.target.value })} placeholder="db-server-01" />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-gray-500 mb-1">Port</label>
+                      <input className="input-field" type="number" value={form.oracle_port} onChange={(e) => setForm({ ...form, oracle_port: Number(e.target.value) })} />
+                    </div>
                   </div>
-                  <div>
-                    <label className="block text-xs text-gray-500 mb-1">Port</label>
-                    <input className="input-field" type="number" value={form.oracle_port} onChange={(e) => setForm({ ...form, oracle_port: Number(e.target.value) })} />
+                  <div className="grid grid-cols-2 gap-3 mt-3">
+                    <div>
+                      <label className="block text-xs text-gray-500 mb-1">
+                        {form.server_type === 'oracle' ? 'Service Name' : 'Database Name'}
+                      </label>
+                      <input className="input-field" value={form.oracle_service} onChange={(e) => setForm({ ...form, oracle_service: e.target.value })} placeholder={form.server_type === 'oracle' ? 'ORCL' : 'public'} />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-gray-500 mb-1">Username</label>
+                      <input className="input-field" value={form.oracle_user} onChange={(e) => setForm({ ...form, oracle_user: e.target.value })} placeholder={form.server_type === 'oracle' ? 'system' : 'root'} />
+                    </div>
+                  </div>
+                  <div className="mt-3">
+                    <label className="block text-xs text-gray-500 mb-1">Password {editServer && '(leave blank to keep current)'}</label>
+                    <div className="relative">
+                      <input className="input-field pr-10" type={showPwd ? 'text' : 'password'} value={form.oracle_password} onChange={(e) => setForm({ ...form, oracle_password: e.target.value })} />
+                      <button type="button" className="absolute right-2 top-1/2 -translate-y-1/2" onClick={() => setShowPwd(!showPwd)}>
+                        {showPwd ? <EyeOff className="h-4 w-4 text-gray-400" /> : <Eye className="h-4 w-4 text-gray-400" />}
+                      </button>
+                    </div>
+                  </div>
+                  <div className="mt-3">
+                    <label className="block text-xs text-gray-500 mb-1">Or Full Connection String</label>
+                    <input className="input-field" value={form.connection_string} onChange={(e) => setForm({ ...form, connection_string: e.target.value })} placeholder="user/pass@host:1521/service" />
                   </div>
                 </div>
-                <div className="grid grid-cols-2 gap-3 mt-3">
+              )}
+
+              {/* AWS Cloud Fields */}
+              {form.server_type === 'aws' && (
+                <div className="border-t pt-3 mt-2">
+                  <p className="text-sm font-medium text-gray-700 mb-2">AWS Credentials</p>
                   <div>
-                    <label className="block text-xs text-gray-500 mb-1">
-                      {form.server_type === 'oracle' ? 'Service Name' : 'Database Name'}
-                    </label>
-                    <input className="input-field" value={form.oracle_service} onChange={(e) => setForm({ ...form, oracle_service: e.target.value })} placeholder={form.server_type === 'oracle' ? 'ORCL' : 'public'} />
+                    <label className="block text-xs text-gray-500 mb-1">AWS Region</label>
+                    <input className="input-field" value={form.aws_region || ''} onChange={(e) => {
+                      const newEnv = { ...JSON.parse(form.env_vars || '{}'), AWS_REGION: e.target.value };
+                      setForm({ ...form, aws_region: e.target.value, env_vars: JSON.stringify(newEnv, null, 2) });
+                    }} placeholder="us-east-1" />
                   </div>
+                  <p className="text-xs text-gray-400 mt-3">
+                    Set <code>AWS_ACCESS_KEY_ID</code> and <code>AWS_SECRET_ACCESS_KEY</code> in <strong>Environment Variables</strong> below.
+                  </p>
+                </div>
+              )}
+
+              {/* Azure Cloud Fields */}
+              {form.server_type === 'azure' && (
+                <div className="border-t pt-3 mt-2">
+                  <p className="text-sm font-medium text-gray-700 mb-2">Azure Credentials</p>
+                  <div className="space-y-3">
+                    <div>
+                      <label className="block text-xs text-gray-500 mb-1">Subscription ID</label>
+                      <input className="input-field" value={form.azure_subscription_id || ''} onChange={(e) => {
+                        const newEnv = { ...JSON.parse(form.env_vars || '{}'), AZURE_SUBSCRIPTION_ID: e.target.value };
+                        setForm({ ...form, azure_subscription_id: e.target.value, env_vars: JSON.stringify(newEnv, null, 2) });
+                      }} placeholder="00000000-0000-0000-0000-000000000000" />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-gray-500 mb-1">Resource Group</label>
+                      <input className="input-field" value={form.azure_resource_group || ''} onChange={(e) => {
+                        const newEnv = { ...JSON.parse(form.env_vars || '{}'), AZURE_RESOURCE_GROUP: e.target.value };
+                        setForm({ ...form, azure_resource_group: e.target.value, env_vars: JSON.stringify(newEnv, null, 2) });
+                      }} placeholder="my-resource-group" />
+                    </div>
+                  </div>
+                  <p className="text-xs text-gray-400 mt-3">
+                    Set <code>AZURE_CLIENT_ID</code>, <code>AZURE_CLIENT_SECRET</code>, and <code>AZURE_TENANT_ID</code> in <strong>Environment Variables</strong> below.
+                  </p>
+                </div>
+              )}
+
+              {/* Kubernetes Fields */}
+              {form.server_type === 'kubernetes' && (
+                <div className="border-t pt-3 mt-2">
+                  <p className="text-sm font-medium text-gray-700 mb-2">Kubernetes Config</p>
                   <div>
-                    <label className="block text-xs text-gray-500 mb-1">Username</label>
-                    <input className="input-field" value={form.oracle_user} onChange={(e) => setForm({ ...form, oracle_user: e.target.value })} placeholder={form.server_type === 'oracle' ? 'system' : 'root'} />
+                    <label className="block text-xs text-gray-500 mb-1">Default Namespace</label>
+                    <input className="input-field" value={form.k8s_namespace || ''} onChange={(e) => {
+                      const newEnv = { ...JSON.parse(form.env_vars || '{}'), K8S_NAMESPACE: e.target.value };
+                      setForm({ ...form, k8s_namespace: e.target.value, env_vars: JSON.stringify(newEnv, null, 2) });
+                    }} placeholder="default" />
                   </div>
+                  <p className="text-xs text-gray-400 mt-3">
+                    Set <code>KUBECONFIG</code> path in <strong>Environment Variables</strong> below if not using in-cluster config.
+                  </p>
                 </div>
-                <div className="mt-3">
-                  <label className="block text-xs text-gray-500 mb-1">Password {editServer && '(leave blank to keep current)'}</label>
-                  <div className="relative">
-                    <input className="input-field pr-10" type={showPwd ? 'text' : 'password'} value={form.oracle_password} onChange={(e) => setForm({ ...form, oracle_password: e.target.value })} />
-                    <button type="button" className="absolute right-2 top-1/2 -translate-y-1/2" onClick={() => setShowPwd(!showPwd)}>
-                      {showPwd ? <EyeOff className="h-4 w-4 text-gray-400" /> : <Eye className="h-4 w-4 text-gray-400" />}
-                    </button>
-                  </div>
-                </div>
-                <div className="mt-3">
-                  <label className="block text-xs text-gray-500 mb-1">Or Full Connection String</label>
-                  <input className="input-field" value={form.connection_string} onChange={(e) => setForm({ ...form, connection_string: e.target.value })} placeholder="user/pass@host:1521/service" />
-                </div>
-              </div>
+              )}
 
               <div className="border-t pt-3">
                 <label className="block text-sm font-medium text-gray-700 mb-1">Environment Variables (JSON)</label>

@@ -1,4 +1,4 @@
-from pydantic_settings import BaseSettings
+﻿from pydantic_settings import BaseSettings
 from typing import List
 import os
 
@@ -19,7 +19,6 @@ class Settings(BaseSettings):
     APP_ENV: str = "development"
     LOG_LEVEL: str = "INFO"
     CORS_ORIGINS: str = "http://localhost:5173,http://localhost:3000"
-    # Azure AI Foundry
     AZURE_AI_FOUNDRY_ENDPOINT: str = ""
     AZURE_AI_FOUNDRY_PROJECT: str = ""
     AZURE_AI_FOUNDRY_MODEL_DEPLOYMENT: str = "gpt-4o"
@@ -33,17 +32,8 @@ class Settings(BaseSettings):
     AZURE_AI_SEARCH_KEY: str = ""
     AZURE_AI_SEARCH_INDEX: str = ""
     AZURE_KEY_VAULT_URL: str = ""
-    # Azure Blob Storage — for Knowledge Base file uploads
-    # Set AZURE_BLOB_ACCOUNT_URL to enable blob storage (e.g. https://infraaiknowledge.blob.core.windows.net)
-    # Uses the same service principal (AZURE_CLIENT_ID/SECRET/TENANT_ID) — no extra key needed
-    AZURE_BLOB_ACCOUNT_URL: str = ""
-    AZURE_BLOB_CONTAINER: str = "knowledge-docs"
-    # Authentication
     AUTH_LOCAL_ENABLED: bool = True
-    # Encryption key for database secrets (separate from JWT SECRET_KEY)
-    # If not set, falls back to SECRET_KEY for backwards compatibility
     ENCRYPTION_KEY: str = ""
-    # RAG / Knowledge Base
     RAG_ENABLED: bool = False
     RAG_EMBEDDING_MODEL: str = "text-embedding-3-small"
     RAG_EMBEDDING_DIMENSIONS: int = 1536

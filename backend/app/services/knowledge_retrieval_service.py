@@ -23,6 +23,158 @@ class RetrievedChunk:
     metadata: dict = field(default_factory=dict)
 
 
+async def _search_foundry_vector_store(
+    query: str,
+    top_k: int,
+    source_types: list[str] | None = None,
+    source_ids: list[str] | None = None,
+) -> List[RetrievedChunk]:
+    """Search Azure AI Foundry knowledge via the infraai-knowledge agent.
+
+    Uses the Foundry Assistants Threads API to run a short search query
+    through the infraai-knowledge agent, which is connected to the vector
+    store via file_search tool.  The agent returns the most relevant
+    snippets from the indexed documents.
+    """
+    import asyncio
+    import httpx
+    from app.services.azure_foundry_service import (
+        _threads_base, _THREADS_API_VERSION, _threads_headers,
+        _ensure_assistant_id,
+    )
+    from app.config import settings as app_settings
+
+    if not app_settings.AZURE_AI_FOUNDRY_ENDPOINT:
+        return []
+
+    agent_name = "infraai-knowledge"
+    assistant_id = await _ensure_assistant_id(agent_name)
+    if not assistant_id:
+        logger.debug("Agent '%s' not found in Foundry — cannot search via agent", agent_name)
+        return []
+
+    base = _threads_base()
+    ver = _THREADS_API_VERSION
+    hdrs = _threads_headers()
+
+    # Prompt the agent to search and return relevant file snippets
+    search_message = (
+        f"Search your knowledge base for information about: {query}\n\n"
+        f"Return the top {top_k} most relevant document snippets with their "
+        f"file names and relevance scores. Format each result as: "
+        f"FILE: <filename> | SCORE: <0.0-1.0> | CONTENT: <snippet>"
+    )
+
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as http:
+            # 1. Create thread
+            r = await http.post(f"{base}/threads?api-version={ver}", headers=hdrs, json={})
+            r.raise_for_status()
+            thread_id = r.json()["id"]
+
+            try:
+                # 2. Add search message
+                r = await http.post(
+                    f"{base}/threads/{thread_id}/messages?api-version={ver}",
+                    headers=hdrs,
+                    json={"role": "user", "content": search_message},
+                )
+                r.raise_for_status()
+
+                # 3. Create run
+                r = await http.post(
+                    f"{base}/threads/{thread_id}/runs?api-version={ver}",
+                    headers=hdrs,
+                    json={"assistant_id": assistant_id},
+                )
+                r.raise_for_status()
+                run_id = r.json()["id"]
+
+                # 4. Poll (shorter timeout for search)
+                elapsed = 0.0
+                poll = 1.0
+                while elapsed < 45.0:
+                    await asyncio.sleep(poll)
+                    elapsed += poll
+                    poll = min(poll * 1.5, 5.0)
+                    r = await http.get(
+                        f"{base}/threads/{thread_id}/runs/{run_id}?api-version={ver}",
+                        headers=hdrs,
+                    )
+                    r.raise_for_status()
+                    status = r.json().get("status", "")
+                    if status == "completed":
+                        break
+                    if status in ("failed", "cancelled", "expired"):
+                        raise RuntimeError(f"Agent run {status}")
+
+                # 5. Get assistant reply
+                r = await http.get(
+                    f"{base}/threads/{thread_id}/messages?api-version={ver}&order=desc&limit=5",
+                    headers=hdrs,
+                )
+                r.raise_for_status()
+                reply = ""
+                for msg in r.json().get("data", []):
+                    if msg.get("role") == "assistant":
+                        for block in msg.get("content", []):
+                            if block.get("type") == "text":
+                                reply = block["text"]["value"]
+                                break
+                        break
+            finally:
+                # Cleanup thread
+                try:
+                    await http.delete(f"{base}/threads/{thread_id}?api-version={ver}", headers=hdrs)
+                except Exception:
+                    pass
+
+    except Exception as e:
+        logger.warning("Foundry agent search failed: %s", e)
+        return []
+
+    # Parse the agent's structured response
+    if not reply:
+        return []
+
+    chunks = []
+    import re
+    for match in re.finditer(
+        r"FILE:\s*(.+?)\s*\|\s*SCORE:\s*([0-9.]+)\s*\|\s*CONTENT:\s*(.+?)(?=FILE:|$)",
+        reply, re.DOTALL | re.IGNORECASE
+    ):
+        fname = match.group(1).strip()
+        try:
+            score = float(match.group(2))
+        except ValueError:
+            score = 0.5
+        content = match.group(3).strip()[:2000]
+        chunks.append(RetrievedChunk(
+            chunk_content=content,
+            score=min(score, 1.0),
+            document_title=fname,
+            source_name="azure_foundry",
+            source_type="foundry",
+            file_path=fname,
+            metadata={"source": "foundry_agent_search", "agent": agent_name},
+        ))
+
+    # Fallback: if agent didn't format results, treat whole reply as one chunk
+    if not chunks and reply:
+        chunks.append(RetrievedChunk(
+            chunk_content=reply[:2000],
+            score=0.5,
+            document_title="Foundry Knowledge",
+            source_name="azure_foundry",
+            source_type="foundry",
+            file_path="",
+            metadata={"source": "foundry_agent_search", "unstructured": True},
+        ))
+
+    logger.info("Foundry agent search returned %d chunks for: %.50s…", len(chunks), query)
+    return chunks
+
+
 async def search_knowledge_base(
     query: str,
     db: AsyncSession,
@@ -32,7 +184,11 @@ async def search_knowledge_base(
     source_types: list[str] | None = None,
     source_ids: list[str] | None = None,
 ) -> List[RetrievedChunk]:
-    """Search the knowledge base using the query string. Returns ranked chunks."""
+    """Search the knowledge base using the query string. Returns ranked chunks.
+    
+    Prefers Azure AI Foundry vector store when available (auto-chunked + auto-embedded).
+    Falls back to local pgvector when Foundry is not configured.
+    """
     if not await is_rag_enabled(db):
         return []
 
@@ -42,6 +198,16 @@ async def search_knowledge_base(
     if score_threshold is None:
         score_threshold = float(settings.get("rag_score_threshold", 0.7))
 
+    from app.config import settings as app_settings
+
+    # ── Primary path: Foundry vector store (fully managed, no local embed needed) ──
+    if app_settings.AZURE_AI_FOUNDRY_ENDPOINT:
+        foundry_chunks = await _search_foundry_vector_store(query, top_k, source_types, source_ids)
+        if foundry_chunks:
+            return foundry_chunks[:top_k]
+        # Fall through to pgvector if Foundry returns nothing
+
+    # ── Fallback: local pgvector (requires embedding provider) ──
     try:
         query_embedding = await embed_text(query, db)
     except Exception as e:

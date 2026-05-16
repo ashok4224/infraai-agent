@@ -33,11 +33,6 @@ class Settings(BaseSettings):
     AZURE_AI_SEARCH_KEY: str = ""
     AZURE_AI_SEARCH_INDEX: str = ""
     AZURE_KEY_VAULT_URL: str = ""
-    # Azure Blob Storage — for Knowledge Base file uploads
-    # Set AZURE_BLOB_ACCOUNT_URL to enable blob storage (e.g. https://infraaiknowledge.blob.core.windows.net)
-    # Uses the same service principal (AZURE_CLIENT_ID/SECRET/TENANT_ID) — no extra key needed
-    AZURE_BLOB_ACCOUNT_URL: str = ""
-    AZURE_BLOB_CONTAINER: str = "knowledge-docs"
     # Authentication
     AUTH_LOCAL_ENABLED: bool = True
     # Encryption key for database secrets (separate from JWT SECRET_KEY)

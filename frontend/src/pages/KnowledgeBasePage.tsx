@@ -205,6 +205,7 @@ function CreateSourceForm({ onCreated }: { onCreated: () => void }) {
   const [syncInterval, setSyncInterval] = useState(24);
   const [connectionConfig, setConnectionConfig] = useState('{}');
   const [filterConfig, setFilterConfig] = useState('{}');
+  const [fileToUpload, setFileToUpload] = useState<File | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
@@ -228,7 +229,17 @@ function CreateSourceForm({ onCreated }: { onCreated: () => void }) {
       let conn = {}, filt = {};
       try { conn = JSON.parse(connectionConfig); } catch { throw new Error('Invalid connection config JSON'); }
       try { filt = JSON.parse(filterConfig); } catch { throw new Error('Invalid filter config JSON'); }
-      await knowledgeApi.createSource({ name, description: description || undefined, source_type: sourceType, connection_config: conn, filter_config: filt, sync_interval_hours: syncInterval, is_active: true });
+      const res = await knowledgeApi.createSource({ name, description: description || undefined, source_type: sourceType, connection_config: conn, filter_config: filt, sync_interval_hours: syncInterval, is_active: true });
+      // If this is an upload source and a file was selected, upload it to the knowledge store
+      if (sourceType === 'upload' && fileToUpload) {
+        try {
+          await knowledgeApi.uploadFile(fileToUpload);
+        } catch (uploadErr: any) {
+          // don't block creation, but surface error
+          console.error('File upload failed', uploadErr);
+          setError((uploadErr?.response?.data?.detail) || uploadErr?.message || 'File upload failed');
+        }
+      }
       onCreated();
     } catch (e: any) {
       setError(e.response?.data?.detail || e.message || 'Failed to create');
@@ -267,13 +278,26 @@ function CreateSourceForm({ onCreated }: { onCreated: () => void }) {
 
       <div>
         <label className="block text-sm font-medium text-gray-700 mb-1">Connection Config (JSON)</label>
-        <textarea value={connectionConfig} onChange={(e) => setConnectionConfig(e.target.value)} rows={3} className="w-full border rounded-lg px-3 py-2 text-sm font-mono" placeholder='{"token": "ghp_..."}' />
+        {/* Hide connection config for simple uploads by leaving it editable but optional */}
+        {sourceType !== 'upload' ? (
+          <textarea value={connectionConfig} onChange={(e) => setConnectionConfig(e.target.value)} rows={3} className="w-full border rounded-lg px-3 py-2 text-sm font-mono" placeholder='{"token": "ghp_..."}' />
+        ) : (
+          <textarea value={connectionConfig} onChange={(e) => setConnectionConfig(e.target.value)} rows={2} className="w-full border rounded-lg px-3 py-2 text-sm font-mono" placeholder='{} (not required for local file upload)' />
+        )}
       </div>
 
       <div>
         <label className="block text-sm font-medium text-gray-700 mb-1">Filter Config (JSON)</label>
         <textarea value={filterConfig} onChange={(e) => setFilterConfig(e.target.value)} rows={5} className="w-full border rounded-lg px-3 py-2 text-sm font-mono" />
       </div>
+
+      {sourceType === 'upload' && (
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">Select File to Upload</label>
+          <input type="file" onChange={(e) => setFileToUpload(e.target.files ? e.target.files[0] : null)} className="w-full" />
+          <p className="text-xs text-gray-500 mt-1">Accepted: .md .txt .pdf .docx .yaml .yml .json .tf</p>
+        </div>
+      )}
 
       <div className="flex gap-2">
         <button type="submit" disabled={saving || !name} className="px-4 py-2 bg-brand-600 text-white rounded-lg text-sm hover:bg-brand-700 disabled:opacity-50">

@@ -1,4 +1,4 @@
-"""Foundry configuration router — manage Azure AI Foundry agent registry."""
+"""Foundry configuration router ??? manage Azure AI Foundry agent registry."""
 import logging
 from uuid import UUID
 from typing import List
@@ -250,7 +250,7 @@ async def setup_sharepoint_grounding(
     """Connect SharePoint to the infraai-knowledge agent via sharepoint_grounding.
 
     This creates a Foundry SharePoint connection and configures the agent to
-    search SharePoint LIVE on every query — no file sync or vector store needed
+    search SharePoint LIVE on every query ??? no file sync or vector store needed
     for SharePoint content.
 
     Requires the app registration to have Sites.Read.All + Files.Read.All

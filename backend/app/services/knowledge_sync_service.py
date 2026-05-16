@@ -2,7 +2,7 @@
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, List
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, text, delete, func
@@ -12,11 +12,72 @@ from app.services.knowledge_connectors import get_connector, RawDocument
 from app.services.chunker_service import chunk_document
 from app.services.embedding_service import embed_batch
 from app.services.rag_utils import is_rag_enabled, get_rag_settings
+from app.config import settings as app_settings
 
 logger = logging.getLogger(__name__)
 
 # Max chunks per embed_batch call to stay within API limits
 _EMBED_BATCH_SIZE = 50
+
+
+async def _foundry_upload_doc(raw_doc: RawDocument) -> str | None:
+    """Upload a document to Foundry Files API + add to knowledge vector store.
+
+    Returns the Foundry file_id, or None on failure.
+    Only runs when AZURE_AI_FOUNDRY_ENDPOINT is configured.
+
+    Note: Foundry Files API rejects filenames with '/' (directory separators)
+    or leading '.' — we normalize to just the base filename.
+    """
+    if not app_settings.AZURE_AI_FOUNDRY_ENDPOINT:
+        return None
+    try:
+        from app.services.azure_foundry_service import upload_file_to_foundry, add_file_to_knowledge_store
+        # Build a safe filename for Foundry:
+        # - Use full path with slashes replaced by underscores (avoids basename collisions)
+        # - Strip leading dots
+        # - Foundry Files API only accepts specific extensions; replace unsupported ones with .txt
+        # - Foundry vector store also rejects certain reserved basenames (e.g. "variables.txt")
+        #   so we prefix with "doc_" to ensure uniqueness and avoid reserved names
+        _FOUNDRY_SUPPORTED_EXTS = {
+            "c", "cpp", "css", "csv", "doc", "docx", "gif", "go", "html", "java",
+            "jpeg", "jpg", "js", "json", "md", "pdf", "php", "pkl", "png", "pptx",
+            "py", "rb", "tar", "tex", "ts", "txt", "webp", "xlsx", "xml", "zip",
+        }
+        # Flatten path: replace / with _ and strip leading dots/underscores
+        safe_name = raw_doc.title.replace("/", "_").replace("\\", "_").lstrip("._")
+        safe_name = safe_name or "unnamed"
+        # Replace unsupported extension
+        if "." in safe_name:
+            base_name, ext = safe_name.rsplit(".", 1)
+            ext = ext.lower()
+            if ext not in _FOUNDRY_SUPPORTED_EXTS:
+                safe_name = base_name + ".txt"
+        # Prefix with "doc_" to avoid reserved filenames like "variables.txt"
+        safe_name = "doc_" + safe_name
+        content_bytes = raw_doc.content.encode("utf-8")
+        file_id = await upload_file_to_foundry(safe_name, content_bytes)
+        await add_file_to_knowledge_store(file_id)
+        return file_id
+    except Exception as e:
+        logger.warning("Foundry upload failed for '%s': %s", raw_doc.title, e)
+        return None
+
+
+async def _foundry_delete_file(file_id: str) -> None:
+    """Delete a file from Foundry Files API (removes it from vector store too)."""
+    if not file_id or not app_settings.AZURE_AI_FOUNDRY_ENDPOINT:
+        return
+    try:
+        import httpx
+        from app.services.azure_foundry_service import _threads_base, _THREADS_API_VERSION, _threads_headers
+        base = _threads_base()
+        ver = _THREADS_API_VERSION
+        async with httpx.AsyncClient(timeout=15.0) as http:
+            await http.delete(f"{base}/files/{file_id}?api-version={ver}", headers=_threads_headers())
+        logger.debug("Deleted Foundry file %s", file_id)
+    except Exception as e:
+        logger.warning("Failed to delete Foundry file %s: %s", file_id, e)
 
 
 async def sync_source(source_id: str, db: AsyncSession, *, force: bool = False) -> dict:
@@ -57,12 +118,17 @@ async def sync_source(source_id: str, db: AsyncSession, *, force: bool = False) 
         chunk_size = int(rag_settings.get("rag_chunk_size", 500))
         chunk_overlap = int(rag_settings.get("rag_chunk_overlap", 50))
 
-        # Get existing document hashes for delta detection
+        # Get existing document hashes + Foundry file IDs for delta detection
         existing_docs = await db.execute(
-            select(KnowledgeDocument.id, KnowledgeDocument.content_hash, KnowledgeDocument.file_path)
+            select(KnowledgeDocument.id, KnowledgeDocument.content_hash,
+                   KnowledgeDocument.file_path, KnowledgeDocument.doc_metadata)
             .where(KnowledgeDocument.source_id == source.id)
         )
-        existing_map = {row[2]: (row[0], row[1]) for row in existing_docs.fetchall()}
+        # existing_map: path → (doc_id, content_hash, foundry_file_id_or_None)
+        existing_map = {
+            row[2]: (row[0], row[1], (row[3] or {}).get("foundry_file_id"))
+            for row in existing_docs.fetchall()
+        }
         seen_paths = set()
 
         for raw_doc in raw_docs:
@@ -71,7 +137,7 @@ async def sync_source(source_id: str, db: AsyncSession, *, force: bool = False) 
             content_hash = raw_doc.content_hash
 
             if path in existing_map:
-                doc_id, old_hash = existing_map[path]
+                doc_id, old_hash, old_foundry_file_id = existing_map[path]
                 if old_hash == content_hash:
                     stats["docs_unchanged"] += 1
                     continue
@@ -79,6 +145,11 @@ async def sync_source(source_id: str, db: AsyncSession, *, force: bool = False) 
                 await db.execute(
                     delete(KnowledgeChunk).where(KnowledgeChunk.document_id == doc_id)
                 )
+                # Delete old Foundry file (Foundry will auto-remove from vector store)
+                if old_foundry_file_id:
+                    await _foundry_delete_file(old_foundry_file_id)
+                # Upload updated file to Foundry
+                new_foundry_file_id = await _foundry_upload_doc(raw_doc)
                 doc_result = await db.execute(
                     select(KnowledgeDocument).where(KnowledgeDocument.id == doc_id)
                 )
@@ -87,9 +158,19 @@ async def sync_source(source_id: str, db: AsyncSession, *, force: bool = False) 
                     doc.content_hash = content_hash
                     doc.raw_size_bytes = raw_doc.raw_size_bytes
                     doc.indexed_at = datetime.now(timezone.utc)
+                    meta = dict(doc.doc_metadata or {})
+                    if new_foundry_file_id:
+                        meta["foundry_file_id"] = new_foundry_file_id
+                    elif "foundry_file_id" in meta:
+                        del meta["foundry_file_id"]
+                    doc.doc_metadata = meta
                 stats["docs_updated"] += 1
             else:
-                # New document
+                # New document — upload to Foundry first
+                foundry_file_id = await _foundry_upload_doc(raw_doc)
+                merged_meta = {**raw_doc.metadata}
+                if foundry_file_id:
+                    merged_meta["foundry_file_id"] = foundry_file_id
                 doc = KnowledgeDocument(
                     source_id=source.id,
                     title=raw_doc.title,
@@ -97,69 +178,83 @@ async def sync_source(source_id: str, db: AsyncSession, *, force: bool = False) 
                     content_hash=content_hash,
                     doc_type=raw_doc.doc_type,
                     raw_size_bytes=raw_doc.raw_size_bytes,
-                    doc_metadata=raw_doc.metadata,
+                    doc_metadata=merged_meta,
                 )
                 db.add(doc)
                 await db.flush()
                 doc_id = doc.id
                 stats["docs_new"] += 1
 
-            # Chunk the document
-            try:
-                chunks = chunk_document(
-                    raw_doc.content,
-                    raw_doc.doc_type,
-                    chunk_size=chunk_size,
-                    chunk_overlap=chunk_overlap,
-                    file_path=raw_doc.file_path,
-                )
-            except Exception as e:
-                stats["errors"].append(f"Chunk error for {path}: {e}")
-                continue
+            # Skip local chunking/embedding when Foundry handles it:
+            # Foundry auto-chunks + auto-embeds files in the vector store.
+            # We still run local chunk/embed as a fallback when Foundry is NOT configured.
+            _foundry_handles_kb = bool(app_settings.AZURE_AI_FOUNDRY_ENDPOINT)
 
-            # Embed in batches
-            chunk_texts = [c.content for c in chunks]
-            all_embeddings = []
-            for i in range(0, len(chunk_texts), _EMBED_BATCH_SIZE):
-                batch = chunk_texts[i:i + _EMBED_BATCH_SIZE]
+            if _foundry_handles_kb:
+                # Foundry auto-chunks & auto-embeds — just record doc exists
+                if doc:
+                    doc.chunk_count = 0  # managed externally by Foundry
+                logger.debug("Skipping local embed for %s (Foundry handles it)", path)
+            else:
+                # No Foundry — run local chunk → embed → pgvector pipeline
                 try:
-                    batch_embeddings = await embed_batch(batch, db)
-                    all_embeddings.extend(batch_embeddings)
+                    chunks = chunk_document(
+                        raw_doc.content,
+                        raw_doc.doc_type,
+                        chunk_size=chunk_size,
+                        chunk_overlap=chunk_overlap,
+                        file_path=raw_doc.file_path,
+                    )
                 except Exception as e:
-                    stats["errors"].append(f"Embed error for {path} batch {i}: {e}")
-                    break
+                    stats["errors"].append(f"Chunk error for {path}: {e}")
+                    continue
 
-            if len(all_embeddings) != len(chunks):
-                stats["errors"].append(f"Embedding count mismatch for {path}")
-                continue
+                # Embed in batches
+                chunk_texts = [c.content for c in chunks]
+                all_embeddings = []
+                for i in range(0, len(chunk_texts), _EMBED_BATCH_SIZE):
+                    batch = chunk_texts[i:i + _EMBED_BATCH_SIZE]
+                    try:
+                        batch_embeddings = await embed_batch(batch, db)
+                        all_embeddings.extend(batch_embeddings)
+                    except Exception as e:
+                        stats["errors"].append(f"Embed error for {path} batch {i}: {e}")
+                        break
 
-            # Store chunks with embeddings
-            for idx, (chunk, embedding) in enumerate(zip(chunks, all_embeddings)):
-                chunk_id = uuid.uuid4()
-                embedding_literal = "[" + ",".join(str(v) for v in embedding) + "]"
-                await db.execute(text("""
-                    INSERT INTO knowledge_chunks (id, document_id, chunk_index, content, embedding, token_count, metadata, created_at)
-                    VALUES (:id, :doc_id, :idx, :content, :embedding::vector, :tokens, :meta::jsonb, NOW())
-                """), {
-                    "id": str(chunk_id),
-                    "doc_id": str(doc_id),
-                    "idx": idx,
-                    "content": chunk.content,
-                    "embedding": embedding_literal,
-                    "tokens": chunk.token_count,
-                    "meta": str(chunk.metadata).replace("'", '"') if chunk.metadata else "{}",
-                })
-                stats["chunks_created"] += 1
+                if len(all_embeddings) != len(chunks):
+                    stats["errors"].append(f"Embedding count mismatch for {path}")
+                    continue
 
-            # Update document chunk count
-            if doc:
-                doc.chunk_count = len(chunks)
+                # Store chunks with embeddings
+                for idx, (chunk, embedding) in enumerate(zip(chunks, all_embeddings)):
+                    chunk_id = uuid.uuid4()
+                    embedding_literal = "[" + ",".join(str(v) for v in embedding) + "]"
+                    await db.execute(text("""
+                        INSERT INTO knowledge_chunks (id, document_id, chunk_index, content, embedding, token_count, metadata, created_at)
+                        VALUES (:id, :doc_id, :idx, :content, :embedding::vector, :tokens, :meta::jsonb, NOW())
+                    """), {
+                        "id": str(chunk_id),
+                        "doc_id": str(doc_id),
+                        "idx": idx,
+                        "content": chunk.content,
+                        "embedding": embedding_literal,
+                        "tokens": chunk.token_count,
+                        "meta": str(chunk.metadata).replace("'", '"') if chunk.metadata else "{}",
+                    })
+                    stats["chunks_created"] += 1
+
+                # Update document chunk count
+                if doc:
+                    doc.chunk_count = len(chunks)
 
         # Remove documents that no longer exist in the source
         deleted_paths = set(existing_map.keys()) - seen_paths
         if deleted_paths:
             for dpath in deleted_paths:
-                doc_id, _ = existing_map[dpath]
+                doc_id, _, old_foundry_file_id = existing_map[dpath]
+                # Remove from Foundry vector store
+                if old_foundry_file_id:
+                    await _foundry_delete_file(old_foundry_file_id)
                 await db.execute(delete(KnowledgeChunk).where(KnowledgeChunk.document_id == doc_id))
                 await db.execute(delete(KnowledgeDocument).where(KnowledgeDocument.id == doc_id))
 
