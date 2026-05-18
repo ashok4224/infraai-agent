@@ -214,38 +214,62 @@ async def _postgres_query_tool(config_id: str, sql: str) -> dict:
     import asyncio
 
     pg_dsn = _build_pg_dsn(config) or (config.connection_string or "")
-    if pg_dsn and "postgresql://" in pg_dsn:
+
+    if pg_dsn:
+        # asyncpg: accepts both postgresql:// URL and libpq key=value format
         try:
             import asyncpg
-            conn = await asyncpg.connect(pg_dsn)
-            rows = await conn.fetch(sql)
+            if pg_dsn.startswith("postgresql://") or pg_dsn.startswith("postgres://"):
+                conn = await asyncio.wait_for(asyncpg.connect(dsn=pg_dsn), timeout=10)
+            else:
+                # libpq format — parse into individual params
+                import re
+                kv = dict(re.findall(r"(\w+)=([^\s]+)", pg_dsn))
+                conn = await asyncio.wait_for(
+                    asyncpg.connect(
+                        host=kv.get("host", config.oracle_host),
+                        port=int(kv.get("port", config.oracle_port or 5432)),
+                        database=kv.get("dbname", config.oracle_service or "postgres"),
+                        user=kv.get("user", config.oracle_user),
+                        password=kv.get("password", config.oracle_password or ""),
+                    ),
+                    timeout=10,
+                )
+            rows = await conn.fetch(sql.strip().rstrip(";"))
             columns = list(rows[0].keys()) if rows else []
             await conn.close()
+            logger.info("PostgreSQL MCP query succeeded via asyncpg on '%s'", config.name)
             return {"success": True, "data": {"columns": columns, "rows": [list(r.values()) for r in rows]}}
         except ImportError:
-            try:
-                import psycopg2
-                def _run():
-                    conn = psycopg2.connect(pg_dsn)
-                    cur = conn.cursor()
-                    cur.execute(sql)
-                    cols = [d[0] for d in cur.description] if cur.description else []
-                    rows = cur.fetchall()
-                    cur.close()
-                    conn.close()
-                    return {"columns": cols, "rows": [list(r) for r in rows]}
-                data = await asyncio.to_thread(_run)
-                return {"success": True, "data": data}
-            except Exception as e:
-                return {"success": False, "error": str(e)}
+            pass
         except Exception as e:
-            logger.warning("Direct PostgreSQL connection failed: %s — falling back to MCP", e)
+            logger.warning("asyncpg direct connection failed on '%s': %s — trying psycopg2", config.name, e)
 
-    # Fallback: try MCP subprocess
+        # psycopg2 fallback
+        try:
+            import psycopg2
+            def _run():
+                conn = psycopg2.connect(pg_dsn, connect_timeout=10)
+                cur = conn.cursor()
+                cur.execute(sql.strip().rstrip(";"))
+                cols = [d[0] for d in cur.description] if cur.description else []
+                result_rows = cur.fetchall()
+                cur.close()
+                conn.close()
+                return {"columns": cols, "rows": [list(r) for r in result_rows]}
+            data = await asyncio.wait_for(asyncio.to_thread(_run), timeout=20.0)
+            logger.info("PostgreSQL MCP query succeeded via psycopg2 on '%s'", config.name)
+            return {"success": True, "data": data}
+        except ImportError:
+            pass
+        except Exception as e:
+            logger.warning("psycopg2 direct connection failed on '%s': %s — falling back to MCP subprocess", config.name, e)
+
+    # Fallback: MCP subprocess (requires npx in container PATH)
     if config.command and config.command.strip():
         return await _mcp_call_tool(config_id, "pg_query", {"sql": sql})
 
-    return {"success": False, "error": "No working PostgreSQL connection method"}
+    return {"success": False, "error": f"[{config.name}] No working PostgreSQL connection — no direct driver succeeded and no MCP command configured"}
 
 
 # ── MySQL generic executor ──

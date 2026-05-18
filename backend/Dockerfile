@@ -1,8 +1,10 @@
 FROM python:3.12-slim
 
-# Install JDK (headless) + unzip + curl for SQLcl, plus kubectl for K8s MCP
+# Install JDK, unzip, curl, Node.js 20 (for npx MCP servers), kubectl
 RUN apt-get update && apt-get install -y --no-install-recommends \
     default-jre-headless unzip curl gnupg apt-transport-https ca-certificates && \
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+    apt-get install -y --no-install-recommends nodejs && \
     rm -rf /var/lib/apt/lists/*
 
 # Install Oracle SQLcl (latest — has native MCP support)
