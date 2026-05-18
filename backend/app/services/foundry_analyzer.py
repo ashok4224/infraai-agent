@@ -546,6 +546,40 @@ async def _run_collector_step(
     )
     all_servers = srv_result.scalars().all()
 
+    # ── Cloud diagnostics via MCP (independent of SSH servers) ──
+    # "cloud" is the umbrella category for aws/azure — match any cloud MCP
+    if system_type in ("aws", "azure", "kubernetes", "cloud") and mcps:
+        for mcp in mcps:
+            mcp_type = (mcp.server_type or "").lower()
+            # For "cloud" alerts, match any cloud MCP (aws, azure, kubernetes)
+            matches = (
+                (system_type in ("cloud", "aws") and mcp_type == "aws") or
+                (system_type in ("cloud", "azure") and mcp_type == "azure") or
+                (system_type in ("cloud", "kubernetes") and mcp_type == "kubernetes") or
+                (mcp_type == system_type)
+            )
+            if matches:
+                try:
+                    tool_name = f"{mcp_type}_exec"
+                    tool_params = {"config_id": str(mcp.id)}
+                    if mcp_type == "aws":
+                        tool_params.update({"service": "ec2", "operation": "describe_instances", "params": {"Filters": [{"Name": "instance-id", "Values": [alert.instance or ""]}]}})
+                    elif mcp_type == "azure":
+                        rg = (mcp.env_vars or {}).get("AZURE_RESOURCE_GROUP", "")
+                        tool_params.update({"service": "compute", "operation": "list", "resource_group": rg})
+                    elif mcp_type == "kubernetes":
+                        tool_params.update({"verb": "get", "resource": "nodes"})
+
+                    data = await execute_tool(tool_name, tool_params)
+                    collected[f"{mcp.name}_{mcp_type}"] = data
+                    calls.append({
+                        "tool": tool_name,
+                        "server": mcp.name,
+                        "system_type": mcp_type,
+                    })
+                except Exception as e:
+                    collected[f"{mcp.name}_{mcp_type}_error"] = str(e)
+
     if all_servers:
         # Extract OS commands from the researcher's plan, or use defaults
         diagnostic_plan = context.get("diagnostic_plan", "")
@@ -582,40 +616,6 @@ async def _run_collector_step(
                     ("memory_usage", "free -h"),
                     ("cpu_load", "uptime"),
                 ])
-
-        # ── Cloud diagnostics via MCP ──
-        # "cloud" is the umbrella category for aws/azure — match any cloud MCP
-        if system_type in ("aws", "azure", "kubernetes", "cloud"):
-            for mcp in mcps:
-                mcp_type = (mcp.server_type or "").lower()
-                # For "cloud" alerts, match any cloud MCP (aws, azure, kubernetes)
-                matches = (
-                    (system_type in ("cloud", "aws") and mcp_type == "aws") or
-                    (system_type in ("cloud", "azure") and mcp_type == "azure") or
-                    (system_type in ("cloud", "kubernetes") and mcp_type == "kubernetes") or
-                    (mcp_type == system_type)
-                )
-                if matches:
-                    try:
-                        tool_name = f"{mcp_type}_exec"
-                        tool_params = {"config_id": str(mcp.id)}
-                        if mcp_type == "aws":
-                            tool_params.update({"service": "ec2", "operation": "describe_instances"})
-                        elif mcp_type == "azure":
-                            rg = (mcp.env_vars or {}).get("AZURE_RESOURCE_GROUP", "")
-                            tool_params.update({"service": "compute", "operation": "list", "resource_group": rg})
-                        elif mcp_type == "kubernetes":
-                            tool_params.update({"verb": "get", "resource": "nodes"})
-
-                        data = await execute_tool(tool_name, tool_params)
-                        collected[f"{mcp.name}_{mcp_type}"] = data
-                        calls.append({
-                            "tool": tool_name,
-                            "server": mcp.name,
-                            "system_type": mcp_type,
-                        })
-                    except Exception as e:
-                        collected[f"{mcp.name}_{mcp_type}_error"] = str(e)
 
         matched_server = _match_ssh_server(all_servers, alert)
         if matched_server:
