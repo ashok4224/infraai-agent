@@ -207,6 +207,9 @@ _OS_KW         = {"disk usage", "disk_usage", "os_disk", "os_cpu", "os_memory", 
                    "nagios", "nrpe", "check_mk", "icinga"}
 _INFRA_KW      = {"nginx", "apache", "haproxy", "network", "switch", "firewall", "ping", "latency",
                    "ssl", "certificate", "dns", "http_", "blackbox"}
+_CLOUD_KW      = {"aws", "ec2", "rds", "elb", "s3", "lambda", "cloudwatch", "eks", "sns",
+                   "azure", "vmss", "app service", "load balancer", "vnet", "oci",
+                   "ebs_volume", "cloud", "region", "instance_type", "ami"}
 
 
 def classify_alert(alertname: str, labels: dict, metadata: dict) -> str:
@@ -229,6 +232,9 @@ def classify_alert(alertname: str, labels: dict, metadata: dict) -> str:
         return "mysql"
     if any(k in text for k in _SQLSERVER_KW) or "mssql" in job:
         return "sqlserver"
+    # Cloud checks (before OS — e.g., EC2 CPU is cloud, not linux_os)
+    if any(k in text for k in _CLOUD_KW) or any(k in job for k in ("aws", "azure", "ec2", "cloud")):
+        return "cloud"
     # OS-level checks (must come before generic infra)
     if any(k in text for k in _OS_KW) or any(k in text for k in _LINUX_KW) or "node_exporter" in job:
         return "linux_os"
