@@ -204,48 +204,48 @@ async def _k8s_exec_tool(config_id: str, verb: str, resource: str, namespace: st
 
 # ── PostgreSQL generic executor ──
 async def _postgres_query_tool(config_id: str, sql: str) -> dict:
-    """Execute a PostgreSQL query via MCP or direct driver."""
+    """Execute a PostgreSQL query — direct driver first, MCP subprocess as fallback."""
     config = await _load_mcp_config(config_id)
     if config is None:
         return {"success": False, "error": f"MCP config {config_id} not found"}
 
-    # Try MCP subprocess first, fall back to direct driver
+    # Try direct connection first (faster, no subprocess overhead)
+    from app.services.mcp_service import _build_pg_dsn
+    import asyncio
+
+    pg_dsn = _build_pg_dsn(config) or (config.connection_string or "")
+    if pg_dsn and "postgresql://" in pg_dsn:
+        try:
+            import asyncpg
+            conn = await asyncpg.connect(pg_dsn)
+            rows = await conn.fetch(sql)
+            columns = list(rows[0].keys()) if rows else []
+            await conn.close()
+            return {"success": True, "data": {"columns": columns, "rows": [list(r.values()) for r in rows]}}
+        except ImportError:
+            try:
+                import psycopg2
+                def _run():
+                    conn = psycopg2.connect(pg_dsn)
+                    cur = conn.cursor()
+                    cur.execute(sql)
+                    cols = [d[0] for d in cur.description] if cur.description else []
+                    rows = cur.fetchall()
+                    cur.close()
+                    conn.close()
+                    return {"columns": cols, "rows": [list(r) for r in rows]}
+                data = await asyncio.to_thread(_run)
+                return {"success": True, "data": data}
+            except Exception as e:
+                return {"success": False, "error": str(e)}
+        except Exception as e:
+            logger.warning("Direct PostgreSQL connection failed: %s — falling back to MCP", e)
+
+    # Fallback: try MCP subprocess
     if config.command and config.command.strip():
         return await _mcp_call_tool(config_id, "pg_query", {"sql": sql})
 
-    # Direct connection fallback
-    from app.services.mcp_service import _build_pg_dsn, _test_direct_postgresql
-    import asyncio
-
-    pg_dsn = _build_pg_dsn(config)
-    if not pg_dsn:
-        return {"success": False, "error": "No PostgreSQL connection info configured"}
-
-    try:
-        import asyncpg
-        conn = await asyncpg.connect(pg_dsn)
-        rows = await conn.fetch(sql)
-        columns = list(rows[0].keys()) if rows else []
-        await conn.close()
-        return {"success": True, "data": {"columns": columns, "rows": [list(r.values()) for r in rows]}}
-    except ImportError:
-        try:
-            import psycopg2
-            def _run():
-                conn = psycopg2.connect(pg_dsn)
-                cur = conn.cursor()
-                cur.execute(sql)
-                cols = [d[0] for d in cur.description] if cur.description else []
-                rows = cur.fetchall()
-                cur.close()
-                conn.close()
-                return {"columns": cols, "rows": [list(r) for r in rows]}
-            data = await asyncio.to_thread(_run)
-            return {"success": True, "data": data}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-    except Exception as e:
-        return {"success": False, "error": str(e)}
+    return {"success": False, "error": "No working PostgreSQL connection method"}
 
 
 # ── Register all tools ──
