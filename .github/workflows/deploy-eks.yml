@@ -57,6 +57,7 @@ jobs:
           context: backend/
           file: backend/Dockerfile.prod
           push: true
+          no-cache: true
           tags: |
             ${{ env.ECR_REGISTRY }}/infraai/backend:latest
             ${{ env.ECR_REGISTRY }}/infraai/backend:${{ github.sha }}
