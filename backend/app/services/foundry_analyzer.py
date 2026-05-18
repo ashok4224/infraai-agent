@@ -1087,6 +1087,9 @@ def _mcp_to_tool_name(mcp_type: str) -> str | None:
         "postgresql": "postgres_query",
         "mysql": "mysql_query",
         "sqlserver": "sqlserver_query",
+        "mongodb": "mongodb_query",
+        "slack": "slack_send",
+        "prometheus": "prometheus_query",
     }
     return mapping.get(mcp_type)
 
@@ -1110,6 +1113,22 @@ def _default_queries_for_system_type(system_type: str) -> dict[str, str]:
         return {
             "connections": "SHOW STATUS LIKE 'Threads_connected'",
             "processlist": "SELECT id, user, host, db, command, time, state FROM information_schema.processlist",
+            "innodb_status": "SHOW ENGINE INNODB STATUS",
+            "slow_queries": "SHOW GLOBAL STATUS LIKE 'Slow_queries'",
+            "db_size": "SELECT table_schema AS db_name, ROUND(SUM(data_length + index_length)/1024/1024, 2) AS size_mb FROM information_schema.tables GROUP BY table_schema",
+        }
+    elif system_type == "mongodb":
+        return {
+            "server_status": "db.serverStatus()",
+            "current_ops": "db.currentOp()",
+            "collection_stats": "db.getCollectionNames().map(function(c) { return {name: c, stats: db.getCollection(c).stats()} })",
+            "replication_status": "rs.status()",
+        }
+    elif system_type == "sqlserver":
+        return {
+            "active_sessions": "SELECT session_id, status, cpu_time, memory_usage, login_name FROM sys.dm_exec_sessions WHERE is_user_process = 1",
+            "blocking": "SELECT session_id, blocking_session_id, wait_time, wait_type FROM sys.dm_exec_requests WHERE blocking_session_id > 0",
+            "db_size": "SELECT DB_NAME(database_id) AS db_name, CAST(SUM(size)*8/1024 AS DECIMAL(10,2)) AS size_mb FROM sys.master_files GROUP BY database_id",
         }
     return {}
 

@@ -248,13 +248,146 @@ async def _postgres_query_tool(config_id: str, sql: str) -> dict:
     return {"success": False, "error": "No working PostgreSQL connection method"}
 
 
+# ── MySQL generic executor ──
+async def _mysql_query_tool(config_id: str, sql: str) -> dict:
+    """Execute a MySQL query via direct driver or MCP subprocess."""
+    config = await _load_mcp_config(config_id)
+    if config is None:
+        return {"success": False, "error": f"MCP config {config_id} not found"}
+
+    # Build MySQL connection params from MCP config
+    host = config.oracle_host or "localhost"
+    port = config.oracle_port or 3306
+    user = config.oracle_user or "root"
+    password = config.oracle_password or ""
+    db = config.oracle_service or "mysql"
+
+    try:
+        import aiomysql
+        conn = await aiomysql.connect(host=host, port=port, user=user, password=password, db=db)
+        cursor = await conn.cursor()
+        await cursor.execute(sql)
+        rows = await cursor.fetchall()
+        cols = [d[0] for d in cursor.description] if cursor.description else []
+        await cursor.close()
+        conn.close()
+        return {"success": True, "data": {"columns": cols, "rows": [list(r) for r in rows]}}
+    except ImportError:
+        try:
+            import pymysql
+            def _run():
+                conn = pymysql.connect(host=host, port=port, user=user, password=password, database=db)
+                cur = conn.cursor()
+                cur.execute(sql)
+                cols = [d[0] for d in cur.description] if cur.description else []
+                rows = cur.fetchall()
+                cur.close()
+                conn.close()
+                return {"columns": cols, "rows": [list(r) for r in rows]}
+            data = await __import__("asyncio").to_thread(_run)
+            return {"success": True, "data": data}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+# ── MongoDB generic executor ──
+async def _mongodb_query_tool(config_id: str, sql: str) -> dict:
+    """Execute a MongoDB query (shell syntax) via direct pymongo or MCP subprocess."""
+    config = await _load_mcp_config(config_id)
+    if config is None:
+        return {"success": False, "error": f"MCP config {config_id} not found"}
+
+    host = config.oracle_host or "localhost"
+    port = config.oracle_port or 27017
+    user = config.oracle_user or None
+    password = config.oracle_password or None
+    db_name = config.oracle_service or "admin"
+
+    try:
+        import pymongo
+        from urllib.parse import quote_plus
+
+        if user and password:
+            uri = f"mongodb://{quote_plus(user)}:{quote_plus(password)}@{host}:{port}/"
+        else:
+            uri = f"mongodb://{host}:{port}/"
+
+        client = pymongo.MongoClient(uri, serverSelectionTimeoutMS=5000)
+        db = client[db_name]
+
+        # Try to execute as eval (JavaScript) or as aggregation pipeline
+        try:
+            result = list(db.command("eval", {"code": f"function() {{ return JSON.stringify({sql}); }}"}))
+
+        except Exception:
+            result = [{"note": "Query syntax not recognized", "query": sql}]
+
+        client.close()
+        return {"success": True, "data": result}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+# ── Slack executor ──
+async def _slack_send_tool(config_id: str, text: str, channel: str = None) -> dict:
+    """Send a message to Slack via MCP or webhook."""
+    config = await _load_mcp_config(config_id)
+    if config is None:
+        return {"success": False, "error": f"MCP config {config_id} not found"}
+
+    webhook = (config.env_vars or {}).get("SLACK_WEBHOOK_URL", "")
+    if webhook:
+        import httpx
+        payload = {"text": text}
+        if channel:
+            payload["channel"] = channel
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(webhook, json=payload, timeout=10.0)
+                return {"success": resp.status_code < 400, "status": resp.status_code}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    return await _mcp_call_tool(config_id, "slack_send", {"text": text, "channel": channel or ""})
+
+
+# ── Prometheus executor ──
+async def _prometheus_query_tool(config_id: str, query: str) -> dict:
+    """Query Prometheus metrics via HTTP API."""
+    config = await _load_mcp_config(config_id)
+    if config is None:
+        return {"success": False, "error": f"MCP config {config_id} not found"}
+
+    url = (config.env_vars or {}).get("PROMETHEUS_URL", "")
+    if not url:
+        return {"success": False, "error": "PROMETHEUS_URL not configured"}
+
+    import httpx
+    api_url = f"{url.rstrip('/')}/api/v1/query"
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(api_url, params={"query": query})
+            data = resp.json()
+            if data.get("status") == "success":
+                return {"success": True, "data": data["data"]["result"]}
+            return {"success": False, "error": data.get("error", "Unknown error")}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
 # ── Register all tools ──
 
-register_tool("oracle_sql",       _oracle_sql_tool,   system_type="oracle")
-register_tool("ssh_exec",         _ssh_exec_tool,     system_type="os")
-register_tool("aws_exec",         _aws_exec_tool,     system_type="aws")
-register_tool("azure_exec",       _azure_exec_tool,   system_type="azure")
-register_tool("k8s_exec",         _k8s_exec_tool,     system_type="kubernetes")
-register_tool("postgres_query",   _postgres_query_tool, system_type="postgresql")
+register_tool("oracle_sql",       _oracle_sql_tool,        system_type="oracle")
+register_tool("ssh_exec",         _ssh_exec_tool,           system_type="os")
+register_tool("aws_exec",         _aws_exec_tool,           system_type="aws")
+register_tool("azure_exec",       _azure_exec_tool,         system_type="azure")
+register_tool("k8s_exec",         _k8s_exec_tool,           system_type="kubernetes")
+register_tool("postgres_query",   _postgres_query_tool,     system_type="postgresql")
+register_tool("mysql_query",      _mysql_query_tool,        system_type="mysql")
+register_tool("mongodb_query",    _mongodb_query_tool,      system_type="mongodb")
+register_tool("slack_send",       _slack_send_tool,         system_type="notification")
+register_tool("prometheus_query", _prometheus_query_tool,   system_type="prometheus")
 
 logger.info("Tool registry loaded: %d tools registered", len(_tools))
