@@ -560,34 +560,88 @@ async def _run_collector_step(
     if system_type in ("aws", "azure", "kubernetes", "cloud") and mcps:
         for mcp in mcps:
             mcp_type = (mcp.server_type or "").lower()
-            # For "cloud" alerts, match any cloud MCP (aws, azure, kubernetes)
             matches = (
                 (system_type in ("cloud", "aws") and mcp_type == "aws") or
                 (system_type in ("cloud", "azure") and mcp_type == "azure") or
                 (system_type in ("cloud", "kubernetes") and mcp_type == "kubernetes") or
                 (mcp_type == system_type)
             )
-            if matches:
-                try:
-                    tool_name = f"{mcp_type}_exec"
-                    tool_params = {"config_id": str(mcp.id)}
-                    if mcp_type == "aws":
-                        tool_params.update({"service": "ec2", "operation": "describe_instances", "params": {"Filters": [{"Name": "instance-id", "Values": [alert.instance or ""]}]}})
-                    elif mcp_type == "azure":
-                        rg = (mcp.env_vars or {}).get("AZURE_RESOURCE_GROUP", "")
-                        tool_params.update({"service": "compute", "operation": "list", "resource_group": rg})
-                    elif mcp_type == "kubernetes":
-                        tool_params.update({"verb": "get", "resource": "nodes"})
+            if not matches:
+                continue
 
-                    data = await execute_tool(tool_name, tool_params)
-                    collected[f"{mcp.name}_{mcp_type}"] = data
-                    calls.append({
-                        "tool": tool_name,
-                        "server": mcp.name,
-                        "system_type": mcp_type,
-                    })
-                except Exception as e:
-                    collected[f"{mcp.name}_{mcp_type}_error"] = str(e)
+            tool_name = f"{mcp_type}_exec"
+            instance_id = alert.instance or ""
+
+            # AWS: fetch EC2 instance + CloudWatch metrics + CloudWatch logs + EKS
+            if mcp_type == "aws":
+                aws_operations = [
+                    ("ec2_describe", "ec2", "describe_instances", {"Filters": [{"Name": "instance-id", "Values": [instance_id]}]} if instance_id else {}),
+                    ("cw_metrics", "cloudwatch", "get_metric_statistics", {
+                        "Namespace": "AWS/EC2",
+                        "MetricName": "CPUUtilization",
+                        "Dimensions": [{"Name": "InstanceId", "Value": instance_id}],
+                        "StartTime": "15 minutes ago",
+                        "EndTime": "now",
+                        "Period": 300,
+                        "Statistics": ["Average", "Maximum"],
+                    } if instance_id else {}),
+                    ("cw_logs", "logs", "filter_log_events", {
+                        "logGroupName": f"/aws/ec2/{instance_id}" if instance_id else "/aws/ec2",
+                        "limit": 20,
+                    } if instance_id else {}),
+                ]
+                for op_name, svc, operation, params in aws_operations:
+                    try:
+                        data = await execute_tool(tool_name, {
+                            "config_id": str(mcp.id),
+                            "service": svc,
+                            "operation": operation,
+                            "params": params,
+                        })
+                        collected[f"{mcp.name}_{op_name}"] = data
+                        calls.append({"tool": tool_name, "server": mcp.name, "aws_op": op_name})
+                    except Exception as e:
+                        collected[f"{mcp.name}_{op_name}_error"] = str(e)
+
+            # Azure: fetch compute VMs + monitor metrics + activity logs
+            elif mcp_type == "azure":
+                az_operations = [
+                    ("compute_list", "compute", "list_vms", {}),
+                    ("monitor_metrics", "monitor", "list_metrics", {}),
+                    ("monitor_logs", "monitor", "list_activity_logs", {}),
+                ]
+                for op_name, svc, operation, params in az_operations:
+                    try:
+                        data = await execute_tool(tool_name, {
+                            "config_id": str(mcp.id),
+                            "service": svc,
+                            "operation": operation,
+                            "params": params,
+                        })
+                        collected[f"{mcp.name}_{op_name}"] = data
+                        calls.append({"tool": tool_name, "server": mcp.name, "azure_op": op_name})
+                    except Exception as e:
+                        collected[f"{mcp.name}_{op_name}_error"] = str(e)
+
+            # Kubernetes: get nodes + pods + events
+            elif mcp_type == "kubernetes":
+                k8s_operations = [
+                    ("nodes", "get", "nodes"),
+                    ("pods", "get", "pods", "--all-namespaces"),
+                    ("events", "get", "events", "--all-namespaces"),
+                ]
+                for op_name, verb, resource, *extra in k8s_operations:
+                    try:
+                        data = await execute_tool(tool_name, {
+                            "config_id": str(mcp.id),
+                            "verb": verb,
+                            "resource": resource,
+                            "extra_args": extra if extra else None,
+                        })
+                        collected[f"{mcp.name}_{op_name}"] = data
+                        calls.append({"tool": tool_name, "server": mcp.name, "k8s_op": op_name})
+                    except Exception as e:
+                        collected[f"{mcp.name}_{op_name}_error"] = str(e)
 
     if all_servers:
         # Extract OS commands from the researcher's plan, or use defaults
