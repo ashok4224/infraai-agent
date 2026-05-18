@@ -520,16 +520,25 @@ async def _run_collector_step(
         diagnostic_plan = context.get("diagnostic_plan", "")
         queries = _extract_queries_from_plan(diagnostic_plan)
 
+        # If no queries extracted, use default diagnostic queries per DB type
+        if not queries:
+            queries = _default_queries_for_system_type(system_type)
+
         for mcp in mcps:
+            mcp_type = (mcp.server_type or "").lower()
+            tool_name = _mcp_to_tool_name(mcp_type)
+            if not tool_name:
+                continue  # skip unknown MCP types
+
             for qname, sql in queries.items():
                 try:
-                    data = await execute_tool("oracle_sql", {
+                    data = await execute_tool(tool_name, {
                         "config_id": str(mcp.id),
                         "sql": sql,
                     })
                     collected[f"{mcp.name}_{qname}"] = data
                     calls.append({
-                        "tool": "oracle_sql",
+                        "tool": tool_name,
                         "server": mcp.name,
                         "query": qname,
                         "sql": sql,
@@ -1068,6 +1077,41 @@ def _parse_solver_response(text: str) -> dict:
         pass
     # Fallback: return as root_cause text
     return {"root_cause": text, "confidence_score": 0.5, "action_plan": [], "risk_level": "Medium"}
+
+
+def _mcp_to_tool_name(mcp_type: str) -> str | None:
+    """Map MCP server_type to the registered tool name."""
+    mapping = {
+        "oracle": "oracle_sql",
+        "sqlcl": "oracle_sql",
+        "postgresql": "postgres_query",
+        "mysql": "mysql_query",
+        "sqlserver": "sqlserver_query",
+    }
+    return mapping.get(mcp_type)
+
+
+def _default_queries_for_system_type(system_type: str) -> dict[str, str]:
+    """Return default diagnostic queries for each database type."""
+    if system_type in ("oracle", "sqlcl"):
+        return {
+            "tablespace_usage": "SELECT tablespace_name, SUM(bytes)/1024/1024 AS mb_used FROM dba_data_files GROUP BY tablespace_name",
+            "free_space": "SELECT tablespace_name, SUM(bytes)/1024/1024 AS mb_free FROM dba_free_space GROUP BY tablespace_name",
+            "sessions": "SELECT status, COUNT(*) FROM v$session GROUP BY status",
+        }
+    elif system_type == "postgresql":
+        return {
+            "active_connections": "SELECT state, COUNT(*) FROM pg_stat_activity GROUP BY state",
+            "locks": "SELECT pid, relation::regclass, mode, granted FROM pg_locks WHERE NOT granted",
+            "db_size": "SELECT pg_database_size(current_database())/1024/1024 AS mb_size",
+            "long_running": "SELECT pid, now()-query_start AS duration, state, query FROM pg_stat_activity WHERE state != 'idle' AND now()-query_start > interval '1 minute'",
+        }
+    elif system_type == "mysql":
+        return {
+            "connections": "SHOW STATUS LIKE 'Threads_connected'",
+            "processlist": "SELECT id, user, host, db, command, time, state FROM information_schema.processlist",
+        }
+    return {}
 
 
 def _build_email_html(alert: Alert, analysis: dict) -> str:
