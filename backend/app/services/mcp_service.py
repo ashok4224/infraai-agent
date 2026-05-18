@@ -345,14 +345,66 @@ async def call_mcp_tool(config: MCPServerConfig, tool_name: str, arguments: dict
 
 
 async def fetch_oracle_data(config: MCPServerConfig, query: str) -> dict:
-    """Execute a SQL query against Oracle DB.
+    """Execute a SQL query against the configured database.
 
-    Tries direct oracledb connection first (fast, no subprocess overhead).
-    Falls back to MCP subprocess only when oracledb is not installed.
+    Routes to PostgreSQL, MySQL, SQL Server, or Oracle based on server_type.
+    Tries direct connection first (fast), falls back to MCP subprocess.
     """
     dsn = _dsn_summary(config)
 
-    # ── Build connection string once ──
+    # ── PostgreSQL direct query ──
+    server_type = (config.server_type or "").lower()
+    if server_type == "postgresql":
+        pg_dsn = _build_pg_dsn(config)
+        if not pg_dsn:
+            return {"success": False, "error": f"[{config.name}] No PostgreSQL connection info configured"}
+        try:
+            import psycopg2
+
+            def _run_pg():
+                conn = psycopg2.connect(pg_dsn, connect_timeout=10)
+                cur = conn.cursor()
+                cur.execute(query.strip().rstrip(";"))
+                cols = [d[0] for d in cur.description] if cur.description else []
+                rows = cur.fetchall()
+                cur.close()
+                conn.close()
+                return {"columns": cols, "rows": [list(r) for r in rows]}
+
+            try:
+                data = await asyncio.wait_for(asyncio.to_thread(_run_pg), timeout=20.0)
+                return {"success": True, "data": data}
+            except asyncio.TimeoutError:
+                return {"success": False, "error": f"[{config.name}] PostgreSQL query timed out after 20s — {dsn}"}
+            except Exception as e:
+                return {"success": False, "error": f"[{config.name}] PostgreSQL query failed — {dsn} — {e}"}
+        except ImportError:
+            pass
+
+        try:
+            import asyncpg
+
+            host = config.oracle_host
+            port = config.oracle_port or 5432
+            db = config.oracle_service or "postgres"
+            user = config.oracle_user
+            pw = config.oracle_password or ""
+            if config.connection_string:
+                conn = await asyncio.wait_for(asyncpg.connect(dsn=config.connection_string), timeout=10)
+            else:
+                conn = await asyncio.wait_for(asyncpg.connect(host=host, port=port, database=db, user=user, password=pw), timeout=10)
+            rows = await conn.fetch(query.strip().rstrip(";"))
+            await conn.close()
+            if rows:
+                cols = list(rows[0].keys())
+                return {"success": True, "data": {"columns": cols, "rows": [list(r.values()) for r in rows]}}
+            return {"success": True, "data": {"columns": [], "rows": []}}
+        except ImportError:
+            return {"success": False, "error": f"[{config.name}] No PostgreSQL driver installed (install psycopg2-binary or asyncpg)"}
+        except Exception as e:
+            return {"success": False, "error": f"[{config.name}] PostgreSQL query failed — {dsn} — {e}"}
+
+    # ── Build Oracle connection string ──
     conn_str = None
     if config.connection_string:
         conn_str = config.connection_string
