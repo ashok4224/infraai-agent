@@ -244,8 +244,15 @@ async def analyze_alert_with_foundry(alert_id: str, analyst_hint: str | None = N
             )
             db.add(analysis)
             alert.analysis_status = "analyzed"
+            # ── Update matched_agent_name with the actual pipeline agents that ran ──
+            ran_agents = [
+                t.get("agent", "") for t in pipeline_trace
+                if t.get("status") == "ok" and t.get("role") not in ("intake",)
+            ]
+            if ran_agents:
+                alert.matched_agent_name = ", ".join(ran_agents[:6])
             await db.commit()
-            logger.info("Alert %s analyzed via Azure AI Foundry pipeline", alert_id)
+            logger.info("Alert %s analyzed via Azure AI Foundry pipeline — agents: %s", alert_id, alert.matched_agent_name)
 
         except Exception as e:
             logger.exception("Foundry pipeline error for alert %s: %s", alert_id, e)
