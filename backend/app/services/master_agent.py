@@ -207,9 +207,14 @@ _OS_KW         = {"disk usage", "disk_usage", "os_disk", "os_cpu", "os_memory", 
                    "nagios", "nrpe", "check_mk", "icinga"}
 _INFRA_KW      = {"nginx", "apache", "haproxy", "network", "switch", "firewall", "ping", "latency",
                    "ssl", "certificate", "dns", "http_", "blackbox"}
-_CLOUD_KW      = {"aws", "ec2", "rds", "elb", "s3", "lambda", "cloudwatch", "eks", "sns",
-                   "azure", "vmss", "app service", "load balancer", "vnet", "oci",
+_CLOUD_KW      = {"ec2", "rds", "elb", "s3", "lambda", "cloudwatch", "sns",
+                   "vmss", "app service", "load balancer", "vnet", "oci",
                    "ebs_volume", "cloud", "region", "instance_type", "ami"}
+_K8S_KW        = {"pod", "deployment", "statefulset", "daemonset", "replicaset",
+                   "namespace", "kubelet", "coredns", "ingress", "pvc", "pv",
+                   "configmap", "secret", "serviceaccount", "crashloopbackoff",
+                   "oomkilled", "imagepullbackoff", "node not ready", "kube_",
+                   "container", "k8s", "kubernetes"}
 
 
 def classify_alert(alertname: str, labels: dict, metadata: dict) -> str:
@@ -232,7 +237,10 @@ def classify_alert(alertname: str, labels: dict, metadata: dict) -> str:
         return "mysql"
     if any(k in text for k in _SQLSERVER_KW) or "mssql" in job:
         return "sqlserver"
-    # Cloud checks (before OS — e.g., EC2 CPU is cloud, not linux_os)
+    # Kubernetes checks — BEFORE cloud (pod alerts are K8s, not cloud)
+    if any(k in text for k in _K8S_KW) or any(k in job for k in ("kubernetes", "kube", "k8s")):
+        return "kubernetes"
+    # Cloud provider checks (AWS/Azure but NOT K8s) — after K8s
     if any(k in text for k in _CLOUD_KW) or any(k in job for k in ("aws", "azure", "ec2", "cloud")):
         return "cloud"
     # OS-level checks (must come before generic infra)
