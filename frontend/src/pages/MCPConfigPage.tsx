@@ -251,6 +251,9 @@ export default function MCPConfigPage() {
                       else if (type === 'postgresql') { port = 5432; cmd = 'npx'; args = '-y @modelcontextprotocol/server-postgres postgresql://USER:PASS@HOST/DBNAME'; }
                       else if (type === 'mysql') { port = 3306; cmd = 'npx'; args = ''; }
                       else if (type === 'sqlserver') { port = 1433; cmd = 'npx'; args = ''; }
+                      else if (type === 'mongodb') { port = 27017; cmd = 'python'; args = ''; }
+                      else if (type === 'slack') { port = 443; cmd = 'python'; args = '-m app.services.foundry_tools.slack_mcp_server'; }
+                      else if (type === 'prometheus') { port = 9090; cmd = 'python'; args = '-m app.services.foundry_tools.prometheus_mcp_server'; }
                       else if (type === 'aws') { port = 443; cmd = 'python'; args = '-m app.services.foundry_tools.aws_mcp_server'; }
                       else if (type === 'azure') { port = 443; cmd = 'python'; args = '-m app.services.foundry_tools.azure_mcp_server'; }
                       else if (type === 'kubernetes') { port = 443; cmd = 'python'; args = '-m app.services.foundry_tools.kubernetes_mcp_server'; }
@@ -262,9 +265,12 @@ export default function MCPConfigPage() {
                     <option value="postgresql">PostgreSQL</option>
                     <option value="mysql">MySQL</option>
                     <option value="sqlserver">SQL Server</option>
+                    <option value="mongodb">MongoDB</option>
                     <option value="aws">AWS (Cloud)</option>
                     <option value="azure">Azure (Cloud)</option>
                     <option value="kubernetes">Kubernetes</option>
+                    <option value="slack">Slack</option>
+                    <option value="prometheus">Prometheus</option>
                     <option value="custom">Custom (Generic MCP)</option>
                   </select>
                 </div>
@@ -288,8 +294,8 @@ export default function MCPConfigPage() {
                 </div>
               </div>
 
-              {/* DB Connection — hidden for cloud types */}
-              {!['aws','azure','kubernetes'].includes(form.server_type) && (
+              {/* DB Connection — hidden for cloud + non-DB types */}
+              {!['aws','azure','kubernetes','slack','prometheus'].includes(form.server_type) && (
                 <div className="border-t pt-3 mt-2">
                   <p className="text-sm font-medium text-gray-700 mb-2">Database Connection</p>
                   <div className="grid grid-cols-2 gap-3">
