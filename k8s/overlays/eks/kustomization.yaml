@@ -20,6 +20,19 @@ configMapGenerator:
       - config.py=../../../backend/app/config.py
       - foundry_analyzer.py=../../../backend/app/services/foundry_analyzer.py
       - chat_service.py=../../../backend/app/services/chat_service.py
+      - alert_analyzer.py=../../../backend/app/services/alert_analyzer.py
+      - aws_mcp_server.py=../../../backend/app/services/foundry_tools/aws_mcp_server.py
+      - azure_mcp_server.py=../../../backend/app/services/foundry_tools/azure_mcp_server.py
+      - __init__.py=../../../backend/app/services/foundry_tools/__init__.py
+      - knowledge_connectors.py=../../../backend/app/services/knowledge_connectors.py
+      - knowledge_retrieval_service.py=../../../backend/app/services/knowledge_retrieval_service.py
+      - knowledge_router.py=../../../backend/app/routers/knowledge.py
+      - knowledge_sync_service.py=../../../backend/app/services/knowledge_sync_service.py
+      - kubernetes_mcp_server.py=../../../backend/app/services/foundry_tools/kubernetes_mcp_server.py
+      - master_agent.py=../../../backend/app/services/master_agent.py
+      - mcp_service.py=../../../backend/app/services/mcp_service.py
+      - tool_registry.py=../../../backend/app/services/tool_registry.py
+      - foundry_config.py=../../../backend/app/routers/foundry_config.py
 
 images:
   - name: REGISTRY/infraai/backend

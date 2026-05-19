@@ -6,10 +6,32 @@ orchestrates: knowledge → researcher → collector → solver → notifier(s).
 """
 import json
 import logging
+from datetime import datetime, date, timedelta
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import async_session
+
+
+def _make_json_serializable(obj):
+    """Recursively coerce non-JSON-serializable types to JSON-safe equivalents."""
+    if obj is None or isinstance(obj, (str, int, float, bool)):
+        return obj
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    if isinstance(obj, timedelta):
+        return obj.total_seconds()
+    if isinstance(obj, bytes):
+        return obj.decode("utf-8", errors="replace")
+    if isinstance(obj, (list, tuple)):
+        return [_make_json_serializable(i) for i in obj]
+    if isinstance(obj, dict):
+        return {str(k): _make_json_serializable(v) for k, v in obj.items()}
+    try:
+        json.dumps(obj)
+        return obj
+    except Exception:
+        return str(obj)
 from app.models.alert import Alert, AlertAnalysis
 from app.models.foundry_config import FoundryAgentConfig
 from app.models.mcp_config import MCPServerConfig
@@ -239,8 +261,8 @@ async def analyze_alert_with_foundry(alert_id: str, analyst_hint: str | None = N
                 ai_provider_used="azure_foundry",
                 ai_model_used="foundry-pipeline",
                 tools_called=tools_called,
-                logs_collected=context.get("collected_data", {}),
-                full_ai_response=ai_response,
+                logs_collected=_make_json_serializable(context.get("collected_data", {})),
+                full_ai_response=_make_json_serializable(ai_response),
             )
             db.add(analysis)
             alert.analysis_status = "analyzed"
@@ -256,9 +278,15 @@ async def analyze_alert_with_foundry(alert_id: str, analyst_hint: str | None = N
 
         except Exception as e:
             logger.exception("Foundry pipeline error for alert %s: %s", alert_id, e)
+            # Use a fresh session — the original session may be in a broken state
             try:
-                alert.analysis_status = "failed"
-                await db.commit()
+                async with async_session() as _recovery_db:
+                    from sqlalchemy import select as _select
+                    _res = await _recovery_db.execute(_select(Alert).where(Alert.id == alert_id))
+                    _alert = _res.scalar_one_or_none()
+                    if _alert:
+                        _alert.analysis_status = "failed"
+                        await _recovery_db.commit()
             except Exception:
                 pass
 

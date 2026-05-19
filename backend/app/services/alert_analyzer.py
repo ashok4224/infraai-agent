@@ -79,16 +79,10 @@ _MAX_GENERATED_QUERIES = 8
 
 
 async def analyze_alert_background(alert_id: str, analyst_hint: str | None = None):
-    """Background task: analyze an alert using AI + MCP tools."""
-    # ── Dispatch to Azure Foundry pipeline if that mode is active ──
-    async with async_session() as _mode_db:
-        mode_row = await _mode_db.execute(
-            select(AppSetting).where(AppSetting.key == "ai_mode")
-        )
-        mode_setting = mode_row.scalar_one_or_none()
-    if mode_setting and mode_setting.value == "azure_foundry":
-        from app.services.foundry_analyzer import analyze_alert_with_foundry
-        return await analyze_alert_with_foundry(alert_id, analyst_hint)
+    """Background task: analyze an alert using Azure AI Foundry agents (always)."""
+    # ── Always route through Azure AI Foundry multi-agent pipeline ──
+    from app.services.foundry_analyzer import analyze_alert_with_foundry
+    return await analyze_alert_with_foundry(alert_id, analyst_hint)
 
     async with async_session() as db:
         try:
