@@ -182,24 +182,242 @@ async def _azure_exec_tool(config_id: str, service: str, operation: str, resourc
 
 # ── Kubernetes generic executor ──
 async def _k8s_exec_tool(config_id: str, verb: str, resource: str, namespace: str = None, extra_args: list = None) -> dict:
-    """Execute any kubectl command via the k8s-mcp-server.
+    """Execute kubectl-like operations using the Kubernetes Python client directly.
+    Falls back to MCP subprocess if the Python client is unavailable.
 
     Args:
         config_id: MCP server config ID (server_type="kubernetes")
         verb: kubectl verb (get, describe, logs, top, events)
-        resource: k8s resource (pod/podname, nodes, deployments, services, events)
-        namespace: k8s namespace (optional)
-        extra_args: Additional kubectl flags (e.g., ["--tail=100", "-o", "json"])
+        resource: k8s resource type or type/name (e.g. "nodes", "pods", "pod/my-pod")
+        namespace: k8s namespace (optional; None = all namespaces for list ops)
+        extra_args: Additional flags (e.g. ["--tail=100"])
     """
-    tool_args = {
-        "verb": verb,
-        "resource": resource,
-    }
+    import asyncio as _aio
+
+    def _k8s_call():
+        try:
+            from kubernetes import client as k8s_client, config as k8s_config
+        except ImportError:
+            raise RuntimeError("kubernetes Python client not installed")
+
+        # Load config: in-cluster (pod SA) first, then kubeconfig for local dev
+        try:
+            k8s_config.load_incluster_config()
+        except Exception:
+            try:
+                k8s_config.load_kube_config()
+            except Exception as cfg_err:
+                raise RuntimeError(f"Cannot load Kubernetes config: {cfg_err}")
+
+        api_client = k8s_client.ApiClient()
+
+        def _to_dict(obj):
+            """Serialize k8s object to plain dict."""
+            import json
+            return json.loads(json.dumps(api_client.sanitize_for_serialization(obj), default=str))
+
+        def _summarize_pod(p):
+            """Return a compact pod summary instead of the full spec."""
+            return {
+                "name": p["metadata"]["name"],
+                "namespace": p["metadata"].get("namespace", ""),
+                "phase": p.get("status", {}).get("phase", ""),
+                "ready": "/".join(str(c.get("ready", False)) for c in p.get("status", {}).get("containerStatuses", [])) or "?",
+                "restarts": sum(c.get("restartCount", 0) for c in p.get("status", {}).get("containerStatuses", [])),
+                "node": p.get("spec", {}).get("nodeName", ""),
+                "podIP": p.get("status", {}).get("podIP", ""),
+            }
+
+        def _summarize_node(n):
+            conds = {c["type"]: c["status"] for c in n.get("status", {}).get("conditions", [])}
+            cap = n.get("status", {}).get("capacity", {})
+            alloc = n.get("status", {}).get("allocatable", {})
+            return {
+                "name": n["metadata"]["name"],
+                "status": "Ready" if conds.get("Ready") == "True" else "NotReady",
+                "roles": ",".join(k.replace("node-role.kubernetes.io/", "") for k in n["metadata"].get("labels", {}) if "node-role.kubernetes.io/" in k) or "worker",
+                "cpu_capacity": cap.get("cpu", ""),
+                "memory_capacity": cap.get("memory", ""),
+                "cpu_allocatable": alloc.get("cpu", ""),
+                "memory_allocatable": alloc.get("memory", ""),
+                "os": n.get("status", {}).get("nodeInfo", {}).get("osImage", ""),
+                "kernel": n.get("status", {}).get("nodeInfo", {}).get("kernelVersion", ""),
+                "kubelet": n.get("status", {}).get("nodeInfo", {}).get("kubeletVersion", ""),
+            }
+
+        def _summarize_deployment(d):
+            return {
+                "name": d["metadata"]["name"],
+                "namespace": d["metadata"].get("namespace", ""),
+                "desired": d.get("spec", {}).get("replicas", 0),
+                "ready": d.get("status", {}).get("readyReplicas", 0),
+                "available": d.get("status", {}).get("availableReplicas", 0),
+                "image": ",".join(
+                    c.get("image", "") for c in d.get("spec", {}).get("template", {}).get("spec", {}).get("containers", [])
+                ),
+            }
+
+        def _summarize_service(s):
+            return {
+                "name": s["metadata"]["name"],
+                "namespace": s["metadata"].get("namespace", ""),
+                "type": s.get("spec", {}).get("type", ""),
+                "clusterIP": s.get("spec", {}).get("clusterIP", ""),
+                "ports": ",".join(
+                    f"{p.get('port')}/{p.get('protocol', 'TCP')}" for p in s.get("spec", {}).get("ports", [])
+                ),
+            }
+
+        v1 = k8s_client.CoreV1Api()
+        apps_v1 = k8s_client.AppsV1Api()
+        ns = namespace or "default"
+        verb_lower = verb.lower().strip()
+
+        # Parse "type/name" or just "type"
+        res_raw = resource.strip()
+        if "/" in res_raw:
+            res_type_raw, res_name = res_raw.split("/", 1)
+        else:
+            parts = res_raw.split()
+            res_type_raw = parts[0]
+            res_name = parts[1] if len(parts) > 1 else None
+
+        # Normalise aliases
+        TYPE_MAP = {
+            "pods": "pod", "po": "pod",
+            "nodes": "node", "no": "node",
+            "deployments": "deployment", "deploy": "deployment",
+            "services": "service", "svc": "service",
+            "namespaces": "namespace", "ns": "namespace",
+            "events": "event", "ev": "event",
+            "replicasets": "replicaset", "rs": "replicaset",
+            "daemonsets": "daemonset", "ds": "daemonset",
+            "statefulsets": "statefulset", "sts": "statefulset",
+        }
+        res_type = TYPE_MAP.get(res_type_raw.lower(), res_type_raw.lower().rstrip("s"))
+
+        if verb_lower in ("get", "describe"):
+
+            if res_type == "node":
+                if res_name:
+                    raw = _to_dict(v1.read_node(res_name))
+                    return {"kind": "Node", "item": _summarize_node(raw)}
+                else:
+                    items = [_summarize_node(_to_dict(i)) for i in v1.list_node().items]
+                    return {"kind": "NodeList", "count": len(items), "items": items}
+
+            elif res_type == "pod":
+                if res_name:
+                    raw = _to_dict(v1.read_namespaced_pod(res_name, ns))
+                    return {"kind": "Pod", "item": _summarize_pod(raw)}
+                elif namespace:
+                    items = [_summarize_pod(_to_dict(i)) for i in v1.list_namespaced_pod(ns).items]
+                    return {"kind": "PodList", "namespace": ns, "count": len(items), "items": items}
+                else:
+                    items = [_summarize_pod(_to_dict(i)) for i in v1.list_pod_for_all_namespaces().items]
+                    return {"kind": "PodList", "namespace": "all", "count": len(items), "items": items}
+
+            elif res_type in ("deployment",):
+                if namespace:
+                    items = [_summarize_deployment(_to_dict(i)) for i in apps_v1.list_namespaced_deployment(ns).items]
+                else:
+                    items = [_summarize_deployment(_to_dict(i)) for i in apps_v1.list_deployment_for_all_namespaces().items]
+                return {"kind": "DeploymentList", "count": len(items), "items": items}
+
+            elif res_type in ("service",):
+                if namespace:
+                    items = [_summarize_service(_to_dict(i)) for i in v1.list_namespaced_service(ns).items]
+                else:
+                    items = [_summarize_service(_to_dict(i)) for i in v1.list_service_for_all_namespaces().items]
+                return {"kind": "ServiceList", "count": len(items), "items": items}
+
+            elif res_type == "namespace":
+                items = [{"name": i.metadata.name, "status": i.status.phase} for i in v1.list_namespace().items]
+                return {"kind": "NamespaceList", "count": len(items), "items": items}
+
+            elif res_type == "event":
+                if namespace:
+                    raw_items = v1.list_namespaced_event(ns).items
+                else:
+                    raw_items = v1.list_event_for_all_namespaces().items
+                items = [{"name": e.metadata.name, "namespace": e.metadata.namespace,
+                          "reason": e.reason, "message": e.message,
+                          "type": e.type, "count": e.count,
+                          "lastTime": str(e.last_timestamp)} for e in raw_items]
+                return {"kind": "EventList", "count": len(items), "items": items}
+
+            elif res_type in ("replicaset",):
+                if namespace:
+                    data = apps_v1.list_namespaced_replica_set(ns)
+                else:
+                    data = apps_v1.list_replica_set_for_all_namespaces()
+                items = [{"name": i.metadata.name, "namespace": i.metadata.namespace,
+                          "desired": i.spec.replicas, "ready": i.status.ready_replicas} for i in data.items]
+                return {"kind": "ReplicaSetList", "count": len(items), "items": items}
+
+            elif res_type in ("daemonset",):
+                if namespace:
+                    data = apps_v1.list_namespaced_daemon_set(ns)
+                else:
+                    data = apps_v1.list_daemon_set_for_all_namespaces()
+                items = [{"name": i.metadata.name, "namespace": i.metadata.namespace,
+                          "desired": i.status.desired_number_scheduled,
+                          "ready": i.status.number_ready} for i in data.items]
+                return {"kind": "DaemonSetList", "count": len(items), "items": items}
+
+            else:
+                raise ValueError(f"Unsupported resource type: {res_type!r}")
+
+        elif verb_lower == "logs":
+            pod_name = res_name or res_raw
+            tail = 100
+            if extra_args:
+                for a in (extra_args or []):
+                    if a.startswith("--tail="):
+                        try:
+                            tail = int(a.split("=")[1])
+                        except Exception:
+                            pass
+            logs = v1.read_namespaced_pod_log(pod_name, ns, tail_lines=tail)
+            return {"kind": "PodLogs", "pod": pod_name, "namespace": ns, "output": logs}
+
+        elif verb_lower == "top":
+            custom = k8s_client.CustomObjectsApi()
+            if res_type == "node":
+                metrics = custom.list_cluster_custom_object("metrics.k8s.io", "v1beta1", "nodes")
+                items = [{"name": i["metadata"]["name"], "cpu": i["usage"]["cpu"], "memory": i["usage"]["memory"]}
+                         for i in metrics.get("items", [])]
+                return {"kind": "NodeMetrics", "count": len(items), "items": items}
+            else:
+                if namespace:
+                    metrics = custom.list_namespaced_custom_object("metrics.k8s.io", "v1beta1", ns, "pods")
+                else:
+                    metrics = custom.list_cluster_custom_object("metrics.k8s.io", "v1beta1", "pods")
+                items = [{"name": i["metadata"]["name"], "namespace": i["metadata"].get("namespace", ""),
+                          "containers": [{"name": c["name"], "cpu": c["usage"]["cpu"], "memory": c["usage"]["memory"]}
+                                         for c in i.get("containers", [])]}
+                         for i in metrics.get("items", [])]
+                return {"kind": "PodMetrics", "count": len(items), "items": items}
+
+        else:
+            raise ValueError(f"Unsupported verb: {verb_lower!r}")
+
+    try:
+        data = await _aio.wait_for(_aio.to_thread(_k8s_call), timeout=30.0)
+        return {"success": True, "data": data}
+    except ImportError:
+        logger.warning("kubernetes Python client not available — falling back to MCP subprocess")
+    except Exception as k8s_err:
+        logger.warning("Kubernetes Python client call failed (%s) — falling back to MCP subprocess", k8s_err)
+
+    # Fallback: MCP subprocess (requires kubectl in PATH)
+    tool_args = {"verb": verb, "resource": resource}
     if namespace:
         tool_args["namespace"] = namespace
     if extra_args:
         tool_args["extra_args"] = extra_args
     return await _mcp_call_tool(config_id, "k8s_exec", tool_args)
+
 
 
 # ── PostgreSQL generic executor ──
