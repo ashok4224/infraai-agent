@@ -43,6 +43,14 @@ Guidelines:
 - If you don't have enough info, say so and ask clarifying questions.
 - Never fabricate data — distinguish facts from educated guesses.
 
+CRITICAL — LIVE DATA RULE:
+When asked about live infrastructure state (how many clusters/instances/pods,
+current counts, running resources, actual configuration, real-time status, what
+is deployed, list of X in account Y), you MUST call the appropriate tool to get
+real data. NEVER answer live-state questions from conversation history or
+documents — those are stale runbooks/wikis and may be completely wrong.
+Only use tools → synthesize from tool output.
+
 Respond in plain text / markdown. Do NOT respond as JSON unless asked."""
 
 _TOOL_PLAN_SYSTEM_PROMPT = """\
@@ -821,6 +829,22 @@ async def _chat_with_foundry(
         # Build available tools
         tools = await build_chat_tools(db)
 
+        # Planning messages — exclude RAG/knowledge-base context when live tools are
+        # available. RAG docs (runbooks, wikis, audit logs) contain stale cluster/
+        # resource names that cause the model to answer live questions from documents
+        # instead of calling tools. Alert context (starts with "[Context:") is still
+        # useful so we keep that part.
+        if tools:
+            alert_ctx = [c for c in context_parts if c.startswith("[Context:")]
+            planning_messages = [{"role": "system", "content": _CHAT_SYSTEM_PROMPT}]
+            if alert_ctx:
+                planning_messages.append({"role": "user", "content": "\n".join(alert_ctx)})
+            for msg in history:
+                planning_messages.append({"role": msg.role, "content": redact_text(msg.content)})
+        else:
+            # No live tools — include full context (RAG answers knowledge questions)
+            planning_messages = messages
+
         # Find the chat agent
         result = await db.execute(
             select(FoundryAgentConfig).where(
@@ -849,7 +873,7 @@ async def _chat_with_foundry(
             from app.services.azure_foundry_service import _run_chat_completion_with_tools
 
             response = await _run_chat_completion_with_tools(
-                messages,
+                planning_messages,
                 tools=tools if tools else None,
                 timeout=120.0,
             )
@@ -901,10 +925,10 @@ async def _chat_with_foundry(
             return str(response), base_meta
 
         # ── Branch A: Normal message → plan tools if needed (chat_agent exists) ──
-        # Call Azure with tools
+        # Call Azure with tools (use planning_messages to avoid stale RAG context)
         response = await run_agent(
             chat_agent.foundry_agent_name,
-            messages,
+            planning_messages,
             tools=tools if tools else None,
         )
 
