@@ -569,6 +569,10 @@ async def stream_process_chat(
     await db.flush()
     await db.refresh(assistant_msg)
 
+    # Commit NOW — before yielding `done` — so that an immediate approve-plan
+    # request on another connection can see the tool_plan in the DB.
+    await db.commit()
+
     yield {"event": "done", "data": {
         "session_id": str(session.id),
         "message_id": str(assistant_msg.id),
