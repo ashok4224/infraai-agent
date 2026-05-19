@@ -144,6 +144,65 @@ async def _run_chat_completion(messages: list[dict], timeout: float = 120.0) -> 
         await client.close()
 
 
+async def _run_chat_completion_with_tools(
+    messages: list[dict],
+    tools: list[dict],
+    timeout: float = 120.0,
+) -> dict:
+    """Run a chat completion with function calling support.
+
+    Returns a dict:
+      {"type": "message", "content": "..."}
+      or
+      {"type": "tool_calls", "tool_calls": [{"name": "...", "arguments": {...}}]}
+    """
+    client = _make_direct_openai_client()
+    model = settings.AZURE_AI_FOUNDRY_MODEL_DEPLOYMENT or "gpt-4o"
+
+    try:
+        async with asyncio.timeout(timeout):
+            response = await client.chat.completions.create(
+                model=model,
+                messages=messages,
+                tools=tools,
+                tool_choice="auto",
+                temperature=0.2,
+                max_tokens=4096,
+            )
+
+            message = response.choices[0].message
+
+            # Check if the model wants to call functions
+            if getattr(message, "tool_calls", None):
+                tool_calls = []
+                for tc in message.tool_calls:
+                    import json
+                    try:
+                        args = json.loads(tc.function.arguments)
+                    except json.JSONDecodeError:
+                        args = {}
+                    tool_calls.append({
+                        "name": tc.function.name,
+                        "arguments": args,
+                    })
+                return {
+                    "type": "tool_calls",
+                    "tool_calls": tool_calls,
+                }
+
+            # Regular text response
+            return {
+                "type": "message",
+                "content": message.content or "(No response)",
+            }
+
+    except Exception as e:
+        logger.error("Chat completion with tools failed: %s", e)
+        raise
+    finally:
+        await client.close()
+
+
 # -- Assistants Threads API (used when AZURE_AI_FOUNDRY_KEY is set) -----------
 
 _THREADS_API_VERSION = "2025-05-01"
@@ -312,7 +371,12 @@ async def _run_via_threads(agent_name: str, messages: list[dict], timeout: float
 
 # -- Core: run an agent -------------------------------------------------------
 
-async def run_agent(agent_id: str, messages: list[dict], timeout: float = 120.0) -> str:
+async def run_agent(
+    agent_id: str,
+    messages: list[dict],
+    timeout: float = 120.0,
+    tools: list[dict] | None = None,
+) -> str | dict:
     """Run a Foundry agent by name (foundry_agent_name from DB).
 
     When AZURE_AI_FOUNDRY_KEY is set:
@@ -320,8 +384,22 @@ async def run_agent(agent_id: str, messages: list[dict], timeout: float = 120.0)
       → Falls back to direct Chat Completions only if the Threads call fails.
     When using managed identity / service principal:
       → Uses the Conversations + Responses API (v2 SDK pattern).
+
+    Args:
+        agent_id: The Foundry agent name.
+        messages: Conversation messages.
+        timeout: Max seconds to wait.
+        tools: Optional OpenAI function schemas for tool calling.
+               When provided, returns a dict with 'type', 'content', 'tool_calls'.
+               When None, returns a plain string (backward compatible).
     """
     global _agent_reference_available
+
+    # If tools are provided, use the direct chat completion with function calling.
+    # This is the most reliable path for tool calling across all auth methods.
+    if tools:
+        logger.debug("Using direct chat completion with tools for agent %s", agent_id)
+        return await _run_chat_completion_with_tools(messages, tools, timeout=timeout)
 
     # Primary path: API key set → use Assistants Threads API (asst_* agents)
     if settings.AZURE_AI_FOUNDRY_KEY:

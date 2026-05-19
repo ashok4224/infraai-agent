@@ -184,7 +184,12 @@ async def process_chat(
     start_time = time.time()
 
     if ai_mode == "azure_foundry":
-        response_text, metadata = await _chat_with_foundry(db, history_msgs, context_parts)
+        response_text, metadata = await _chat_with_foundry(
+            db, history_msgs, context_parts,
+            approve_tool_plan=approve_tool_plan,
+            tool_plan_id=tool_plan_id,
+            session_id=session.id,
+        )
     else:
         response_text, metadata = await _chat_with_builtin(
             db, history_msgs, context_parts,
@@ -654,11 +659,21 @@ async def _chat_with_foundry(
     db: AsyncSession,
     history: list[ChatMessage],
     context_parts: list[str],
+    *,
+    approve_tool_plan: bool = False,
+    tool_plan_id: str | None = None,
+    session_id=None,
 ) -> tuple[str, dict]:
-    """Send chat through Azure AI Foundry agent."""
+    """Send chat through Azure AI Foundry agent with function calling support.
+
+    Two-phase flow:
+      1. User asks a question → Azure agent plans tool calls → show approval card
+      2. User approves → execute tools → send results back → Azure synthesizes answer
+    """
     try:
-        from app.services.azure_foundry_service import get_foundry_client, run_agent
+        from app.services.azure_foundry_service import run_agent
         from app.models.foundry_config import FoundryAgentConfig
+        from app.services.chat_tool_registry import build_chat_tools, execute_chat_tool_call
 
         # Find the chat agent
         result = await db.execute(
@@ -671,22 +686,334 @@ async def _chat_with_foundry(
         if not chat_agent or not chat_agent.foundry_agent_name:
             return "Azure AI Foundry chat agent is not configured. Please set it up in Foundry Configuration.", {}
 
-        # Build messages for the agent — include system prompt + history
+        # ── Branch B: User approved a pending tool plan ──
+        if approve_tool_plan and tool_plan_id and session_id:
+            return await _execute_approved_plan_foundry(
+                db, chat_agent, history, context_parts, tool_plan_id, session_id,
+            )
+
+        # ── Branch A: Normal message → plan tools if needed ──
         messages = [{"role": "system", "content": _CHAT_SYSTEM_PROMPT}]
         if context_parts:
             messages.append({"role": "user", "content": "\n".join(context_parts)})
         for msg in history:
             messages.append({"role": msg.role, "content": redact_text(msg.content)})
 
-        response_text = await run_agent(chat_agent.foundry_agent_name, messages)
-        return response_text, {
+        # Build available tools
+        tools = await build_chat_tools(db)
+
+        # Call Azure with tools
+        response = await run_agent(
+            chat_agent.foundry_agent_name,
+            messages,
+            tools=tools if tools else None,
+        )
+
+        base_meta = {
             "provider": "azure_foundry",
             "agent": chat_agent.agent_name,
             "agent_name": chat_agent.foundry_agent_name,
         }
+
+        # Handle text response (no tools needed)
+        if isinstance(response, str):
+            return response, base_meta
+
+        if isinstance(response, dict) and response.get("type") == "message":
+            return response.get("content", ""), base_meta
+
+        # Handle tool calls response
+        if isinstance(response, dict) and response.get("type") == "tool_calls":
+            tool_calls_raw = response.get("tool_calls", [])[:_MAX_TOOL_CALLS]
+
+            # Validate tool calls
+            validated = await _validate_foundry_tool_plan(db, tool_calls_raw)
+            if not validated:
+                # All calls invalid → fall back to plain chat
+                logger.info("All Foundry tool calls failed validation — falling back to chat")
+                response_text = await run_agent(
+                    chat_agent.foundry_agent_name, messages, tools=None,
+                )
+                if isinstance(response_text, dict):
+                    response_text = response_text.get("content", str(response_text))
+                return response_text, base_meta
+
+            explanation = (
+                "I need to run some diagnostics to answer your question. "
+                f"Planned {len(validated)} tool call(s)."
+            )
+
+            plan_id = str(_uuid.uuid4())
+            tool_plan = {
+                "id": plan_id,
+                "explanation": explanation,
+                "calls": validated,
+                "status": "pending",
+            }
+
+            meta = {**base_meta, "tool_plan": tool_plan}
+            return explanation, meta
+
+        # Unknown response type
+        logger.warning("Unexpected Foundry response type: %s", type(response))
+        return str(response), base_meta
 
     except ImportError:
         return "Azure AI Foundry SDK is not installed. Install azure-ai-projects package.", {}
     except Exception as e:
         logger.exception("Foundry chat failed: %s", e)
         return f"Azure AI Foundry error: {str(e)}", {"error": str(e)}
+
+
+async def _validate_foundry_tool_plan(db: AsyncSession, tool_calls: list[dict]) -> list[dict]:
+    """Validate AI-planned tool calls before presenting to the user.
+
+    Reuses the same safety checks as the builtin mode but adapted for
+    Azure function calling format.
+    """
+    from app.services.safety import is_sql_safe, is_shell_command_safe
+
+    _MAX_CMD_LEN = 8192
+
+    # Preload server configs
+    mcp_result = await db.execute(
+        select(MCPServerConfig).where(MCPServerConfig.is_active == True)
+    )
+    mcp_names = {m.name for m in mcp_result.scalars().all()}
+
+    ssh_result = await db.execute(
+        select(ServerConfig).where(ServerConfig.is_active == True)
+    )
+    ssh_names = {s.name for s in ssh_result.scalars().all()}
+
+    valid: list[dict] = []
+    for call in tool_calls:
+        name = call.get("name", "")
+        args = call.get("arguments", {})
+
+        # Map tool name back to server and validate
+        server_found = False
+        call_type = "unknown"
+        command_or_query = ""
+
+        if name.startswith("query_oracle_"):
+            server_name = name[len("query_oracle_"):]
+            server_found = server_name in mcp_names
+            call_type = "sql"
+            command_or_query = args.get("sql", "")
+        elif name.startswith("query_postgres_"):
+            server_name = name[len("query_postgres_"):]
+            server_found = server_name in mcp_names
+            call_type = "sql"
+            command_or_query = args.get("sql", "")
+        elif name.startswith("query_mysql_"):
+            server_name = name[len("query_mysql_"):]
+            server_found = server_name in mcp_names
+            call_type = "sql"
+            command_or_query = args.get("sql", "")
+        elif name.startswith("call_aws_"):
+            server_name = name[len("call_aws_"):]
+            server_found = server_name in mcp_names
+            call_type = "aws"
+        elif name.startswith("call_azure_"):
+            server_name = name[len("call_azure_"):]
+            server_found = server_name in mcp_names
+            call_type = "azure"
+        elif name.startswith("call_k8s_"):
+            server_name = name[len("call_k8s_"):]
+            server_found = server_name in mcp_names
+            call_type = "k8s"
+        elif name.startswith("query_mongodb_"):
+            server_name = name[len("query_mongodb_"):]
+            server_found = server_name in mcp_names
+            call_type = "mongodb"
+        elif name.startswith("run_ssh_"):
+            server_name = name[len("run_ssh_"):]
+            server_found = server_name in ssh_names
+            call_type = "ssh"
+            command_or_query = args.get("command", "")
+        else:
+            logger.warning("Foundry plan validation: unknown tool '%s' — removing", name)
+            continue
+
+        if not server_found:
+            logger.warning("Foundry plan validation: server '%s' not found — removing", server_name)
+            continue
+
+        # Safety checks
+        if call_type == "sql":
+            if len(command_or_query) > _MAX_CMD_LEN:
+                logger.warning("Foundry plan validation: SQL too long (%d chars) — removing", len(command_or_query))
+                continue
+            safety = is_sql_safe(command_or_query)
+            if safety.get("risk") in ("High", "Critical") and not safety.get("allowed"):
+                logger.warning("Foundry plan validation: unsafe SQL rejected — %s", safety.get("reason"))
+                continue
+        elif call_type == "ssh":
+            if len(command_or_query) > _MAX_CMD_LEN:
+                logger.warning("Foundry plan validation: command too long (%d chars) — removing", len(command_or_query))
+                continue
+            safety = is_shell_command_safe(command_or_query)
+            if safety.get("risk") == "Critical":
+                logger.warning("Foundry plan validation: critical command rejected — %s", safety.get("reason"))
+                continue
+
+        # Build validated call in the format the frontend expects
+        validated_call = {
+            "type": call_type,
+            "server_name": server_name,
+            "description": f"{name}({', '.join(f'{k}={v}' for k, v in args.items())})"[:200],
+        }
+
+        if call_type == "sql":
+            validated_call["query"] = command_or_query
+        elif call_type == "ssh":
+            validated_call["command"] = command_or_query
+        elif call_type in ("aws", "azure"):
+            validated_call["service"] = args.get("service", "")
+            validated_call["operation"] = args.get("operation", "")
+            validated_call["params"] = args.get("params", {})
+        elif call_type == "k8s":
+            validated_call["verb"] = args.get("verb", "")
+            validated_call["resource"] = args.get("resource", "")
+            validated_call["namespace"] = args.get("namespace", "")
+            validated_call["extra_args"] = args.get("extra_args", [])
+        elif call_type == "mongodb":
+            validated_call["command"] = args.get("command", "")
+
+        # Store original function call info for execution
+        validated_call["_function_name"] = name
+        validated_call["_arguments"] = args
+
+        valid.append(validated_call)
+
+    if len(valid) < len(tool_calls):
+        logger.info("Foundry plan validation: kept %d of %d planned calls", len(valid), len(tool_calls))
+
+    return valid
+
+
+async def _execute_approved_plan_foundry(
+    db: AsyncSession,
+    chat_agent,
+    history: list[ChatMessage],
+    context_parts: list[str],
+    tool_plan_id: str,
+    session_id,
+) -> tuple[str, dict]:
+    """Execute a user-approved tool plan from Azure Foundry and synthesize results."""
+    from app.services.chat_tool_registry import execute_chat_tool_call
+    from app.services.azure_foundry_service import run_agent
+
+    # Find the assistant message that holds the plan
+    plan_result = await db.execute(
+        select(ChatMessage).where(
+            ChatMessage.session_id == session_id,
+            ChatMessage.role == "assistant",
+        ).order_by(ChatMessage.created_at.desc()).limit(10)
+    )
+    plan_msg: ChatMessage | None = None
+    for msg in plan_result.scalars().all():
+        meta = msg.metadata_json or {}
+        tp = meta.get("tool_plan", {})
+        if tp.get("id") == tool_plan_id:
+            plan_msg = msg
+            break
+
+    if not plan_msg:
+        return "Could not find the tool plan to execute. Please try asking your question again.", {}
+
+    tool_plan = plan_msg.metadata_json.get("tool_plan", {})
+    tool_calls = tool_plan.get("calls", [])
+    if not tool_calls:
+        return "The tool plan has no diagnostics to run.", {}
+
+    # Execute the approved tool calls
+    results = []
+    for call in tool_calls:
+        function_call = {
+            "name": call.get("_function_name", ""),
+            "arguments": call.get("_arguments", {}),
+        }
+        result = await execute_chat_tool_call(db, function_call)
+        results.append({
+            "type": call.get("type", "unknown"),
+            "server_name": call.get("server_name", ""),
+            "description": call.get("description", ""),
+            "success": result.get("success", False),
+            "output": result.get("output"),
+            "error": result.get("error"),
+        })
+
+    # Build synthesis prompt with tool results
+    user_question = ""
+    for msg in reversed(history):
+        if msg.role == "user" and msg.content != "(approved tool execution)":
+            user_question = msg.content
+            break
+
+    # Build messages for synthesis
+    messages = [{"role": "system", "content": _CHAT_SYSTEM_PROMPT}]
+    if context_parts:
+        messages.append({"role": "user", "content": "\n".join(context_parts)})
+
+    # Add history
+    for msg in history:
+        messages.append({"role": msg.role, "content": redact_text(msg.content)})
+
+    # Add tool results as a system message
+    results_text = _format_foundry_tool_results(results)
+    synthesis_prompt = (
+        f"The user asked: {user_question}\n\n"
+        f"I ran the following diagnostics and got these results:\n\n"
+        f"{results_text}\n\n"
+        f"Please synthesize a clear, actionable answer based on the actual data above. "
+        f"Quote specific numbers and values. If any tool failed, note it but analyze what we have."
+    )
+    messages.append({"role": "user", "content": synthesis_prompt})
+
+    # Call Azure for synthesis
+    synthesis_response = await run_agent(chat_agent.foundry_agent_name, messages, tools=None)
+    if isinstance(synthesis_response, dict):
+        answer = synthesis_response.get("content", str(synthesis_response))
+    else:
+        answer = synthesis_response
+
+    tools_executed = []
+    for r in results:
+        tools_executed.append({
+            "type": r["type"],
+            "server_name": r["server_name"],
+            "success": r["success"],
+            "description": r.get("description", ""),
+        })
+
+    meta = {
+        "provider": "azure_foundry",
+        "agent": chat_agent.agent_name,
+        "agent_name": chat_agent.foundry_agent_name,
+        "tools_executed": tools_executed,
+        "tool_plan_id": tool_plan_id,
+    }
+    return answer, meta
+
+
+def _format_foundry_tool_results(results: list[dict]) -> str:
+    """Format tool execution results into a text block for AI synthesis."""
+    import json
+    parts = []
+    for i, r in enumerate(results, 1):
+        header = f"=== [{i}] {r['type'].upper()} on {r['server_name']} ==="
+        parts.append(header)
+        parts.append(f"Description: {r.get('description', 'N/A')}")
+
+        if r.get("success"):
+            output = r.get("output", "")
+            if isinstance(output, (dict, list)):
+                output = json.dumps(output, indent=2, default=str)
+            parts.append(f"Result:\n{output}")
+        else:
+            parts.append(f"FAILED: {r.get('error', 'Unknown error')}")
+        parts.append("")
+
+    return "\n".join(parts)
