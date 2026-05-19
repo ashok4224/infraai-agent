@@ -62,7 +62,7 @@ Available tool types:
 - PostgreSQL         → type="postgres",   include "query" (SELECT only)
 - MySQL              → type="mysql",      include "query" (SELECT only)
 - Linux SSH servers  → type="ssh",        include "command" (safe read-only commands)
-- AWS cloud          → type="aws",        include "service" (eks/ec2/rds/cloudwatch/s3/lambda), "operation", and optionally "params" dict
+- AWS cloud          → type="aws",        include "service" (eks/ec2/rds/cloudwatch/s3/lambda), "operation", and "params" dict with ALL required fields for that operation (e.g. EKS list_nodegroups REQUIRES {{"clusterName":"<name>"}}, describe_cluster REQUIRES {{"name":"<name>"}}, describe_nodegroup REQUIRES {{"clusterName":"<name>","nodegroupName":"<ng>"}})
 - Kubernetes         → type="kubernetes", include "verb" (get/describe/logs/top), "resource", optionally "namespace" and "extra_args"
 
 RULES:
@@ -103,8 +103,8 @@ Respond ONLY with valid JSON (no markdown fences):
       "type": "aws",
       "server_name": "<exact AWS server name>",
       "service": "eks",
-      "operation": "list_clusters",
-      "params": {{}},
+      "operation": "list_nodegroups",
+      "params": {{"clusterName": "<cluster-name>"}},
       "description": "<what this checks>"
     }},
     {{

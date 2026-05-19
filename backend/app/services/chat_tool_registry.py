@@ -203,7 +203,15 @@ def _build_aws_tool_schema(mcp: MCPServerConfig) -> dict:
             "name": f"call_aws_{safe_name}",
             "description": (
                 f"Call AWS API via MCP server '{mcp.name}'. "
-                f"Supports EC2, EKS, CloudWatch, RDS, and other AWS services."
+                f"Supports EC2, EKS, CloudWatch, RDS, and other AWS services. "
+                f"IMPORTANT: Many operations require params — always include them. "
+                f"EKS examples: list_nodegroups requires {{\"clusterName\": \"<name>\"}}, "
+                f"describe_nodegroup requires {{\"clusterName\": \"<name>\", \"nodegroupName\": \"<ng>\"}}, "
+                f"describe_cluster requires {{\"name\": \"<cluster-name>\"}}. "
+                f"EC2 examples: describe_instances with {{\"Filters\": [...]}}, "
+                f"describe_instance_status with {{\"InstanceIds\": [\"i-xxxx\"]}}. "
+                f"CloudWatch examples: get_metric_statistics requires Namespace, MetricName, Dimensions, StartTime, EndTime, Period, Statistics. "
+                f"Always populate 'params' with the required fields for the chosen operation."
             ),
             "parameters": {
                 "type": "object",
@@ -215,11 +223,21 @@ def _build_aws_tool_schema(mcp: MCPServerConfig) -> dict:
                     },
                     "operation": {
                         "type": "string",
-                        "description": "AWS API operation, e.g. describe_instances, list_clusters",
+                        "description": (
+                            "AWS API operation in snake_case, e.g. list_nodegroups, describe_cluster, "
+                            "describe_instances, get_metric_statistics. "
+                            "Check AWS docs for required params and always pass them in 'params'."
+                        ),
                     },
                     "params": {
                         "type": "object",
-                        "description": "Optional parameters for the AWS API call",
+                        "description": (
+                            "Parameters for the AWS API call. "
+                            "Required for most operations — do NOT leave empty when the operation needs them. "
+                            "EKS list_nodegroups: {\"clusterName\": \"infraai-dev\"}. "
+                            "EKS describe_nodegroup: {\"clusterName\": \"infraai-dev\", \"nodegroupName\": \"<ng>\"}. "
+                            "EKS describe_cluster: {\"name\": \"infraai-dev\"}."
+                        ),
                         "default": {},
                     },
                 },
