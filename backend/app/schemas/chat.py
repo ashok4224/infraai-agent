@@ -52,6 +52,7 @@ class ChatRequest(BaseModel):
     context_alert_id: Optional[UUID] = None
     approve_tool_plan: bool = False
     tool_plan_id: Optional[str] = None
+    auto_investigate: bool = False
 
 
 class ChatResponse(BaseModel):

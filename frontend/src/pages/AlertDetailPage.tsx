@@ -233,6 +233,14 @@ export default function AlertDetailPage() {
           <p className="text-sm text-gray-500">{alert.instance || 'No instance'} · {alert.source}</p>
         </div>
         <div className="flex items-center gap-2">
+          {/* Investigate in AskMe */}
+          <button
+            onClick={() => navigate(`/ask-me?alertId=${alert.id}&alertName=${encodeURIComponent(alert.alertname)}&autoInvestigate=true`)}
+            className="btn-secondary flex items-center gap-1.5 text-sm text-purple-700 border-purple-300 hover:bg-purple-50"
+            title="Investigate this alert in AskMe"
+          >
+            <MessageSquare className="h-4 w-4" /> Investigate
+          </button>
           {/* Acknowledge */}
           {alert.status === 'firing' && !alert.acknowledged_at && (
             <button onClick={handleAcknowledge} className="btn-secondary flex items-center gap-1.5 text-sm" title="Acknowledge alert">

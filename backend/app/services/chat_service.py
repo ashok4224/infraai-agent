@@ -128,7 +128,14 @@ Guidelines:
 - If any tool call failed, note the failure but still analyse whatever data is available.
 - Use bullet points and markdown formatting for clarity.
 - Provide recommendations if appropriate.
-- Be concise but thorough."""
+- Be concise but thorough.
+
+After your main answer, suggest 3 short follow-up investigation questions in this exact format:
+<suggestions>
+[question 1]
+[question 2]
+[question 3]
+</suggestions>"""
 
 
 # ---------------------------------------------------------------------------
@@ -151,6 +158,7 @@ async def process_chat(
     context_alert_id: UUID | None = None,
     approve_tool_plan: bool = False,
     tool_plan_id: str | None = None,
+    auto_investigate: bool = False,
 ) -> tuple[ChatSession, ChatMessage]:
     """Process a chat message and return the session + assistant response."""
 
@@ -225,6 +233,7 @@ async def process_chat(
         approve_tool_plan=approve_tool_plan,
         tool_plan_id=tool_plan_id,
         session_id=session.id,
+        auto_investigate=auto_investigate,
     )
 
     metadata["latency_ms"] = int((time.time() - start_time) * 1000)
@@ -394,6 +403,7 @@ async def _execute_approved_plan(
             f"Here are the raw results:\n\n{results_text}"
         )
 
+    answer, follow_ups = _extract_follow_ups(answer)
     tools_executed = []
     for r in results:
         tools_executed.append({
@@ -401,12 +411,17 @@ async def _execute_approved_plan(
             "server_name": r["server_name"],
             "success": r["success"],
             "description": r.get("description", ""),
+            "output": _normalize_tool_output(r.get("output")),
+            "query": r.get("query"),
+            "command": r.get("command"),
+            "error": r.get("error"),
         })
 
     meta = {
         **base_meta,
         "tools_executed": tools_executed,
         "tool_plan_id": tool_plan_id,
+        "suggested_follow_ups": follow_ups,
     }
     return answer, meta
 
@@ -807,6 +822,7 @@ async def _chat_with_foundry(
     approve_tool_plan: bool = False,
     tool_plan_id: str | None = None,
     session_id=None,
+    auto_investigate: bool = False,
 ) -> tuple[str, dict]:
     """Send chat through Azure AI Foundry agent with function calling support.
 
@@ -909,6 +925,10 @@ async def _chat_with_foundry(
                     f"Planned {len(validated)} tool call(s)."
                 )
 
+                # Auto-investigate: execute immediately without user approval
+                if auto_investigate:
+                    return await _auto_execute_and_synthesize(db, validated, history, base_meta)
+
                 plan_id = str(_uuid.uuid4())
                 tool_plan = {
                     "id": plan_id,
@@ -965,6 +985,10 @@ async def _chat_with_foundry(
                 "I need to run some diagnostics to answer your question. "
                 f"Planned {len(validated)} tool call(s)."
             )
+
+            # Auto-investigate: execute immediately without user approval
+            if auto_investigate:
+                return await _auto_execute_and_synthesize(db, validated, history, base_meta)
 
             plan_id = str(_uuid.uuid4())
             tool_plan = {
@@ -1201,12 +1225,22 @@ async def _execute_approved_plan_direct_foundry(
         logger.exception("Direct Foundry synthesis failed: %s", e)
         answer = f"I collected the diagnostic data but had trouble synthesizing it.\n\n{results_text}"
 
+    answer, follow_ups = _extract_follow_ups(answer)
     tools_executed = [
-        {"type": r["type"], "server_name": r["server_name"], "success": r["success"], "description": r.get("description", "")}
+        {
+            "type": r["type"],
+            "server_name": r["server_name"],
+            "success": r["success"],
+            "description": r.get("description", ""),
+            "output": _normalize_tool_output(r.get("output")),
+            "query": r.get("query"),
+            "command": r.get("command"),
+            "error": r.get("error"),
+        }
         for r in results
     ]
 
-    meta = {**base_meta, "tools_executed": tools_executed, "tool_plan_id": tool_plan_id}
+    meta = {**base_meta, "tools_executed": tools_executed, "tool_plan_id": tool_plan_id, "suggested_follow_ups": follow_ups}
     return answer, meta
 
 
@@ -1285,7 +1319,9 @@ async def _execute_approved_plan_foundry(
         f"I ran the following diagnostics and got these results:\n\n"
         f"{results_text}\n\n"
         f"Please synthesize a clear, actionable answer based on the actual data above. "
-        f"Quote specific numbers and values. If any tool failed, note it but analyze what we have."
+        f"Quote specific numbers and values. If any tool failed, note it but analyze what we have.\n\n"
+        f"After your answer, add 3 short follow-up investigation questions in this format:\n"
+        f"<suggestions>\n[question 1]\n[question 2]\n[question 3]\n</suggestions>"
     )
     messages.append({"role": "user", "content": synthesis_prompt})
 
@@ -1296,6 +1332,7 @@ async def _execute_approved_plan_foundry(
     else:
         answer = synthesis_response
 
+    answer, follow_ups = _extract_follow_ups(answer)
     tools_executed = []
     for r in results:
         tools_executed.append({
@@ -1303,6 +1340,10 @@ async def _execute_approved_plan_foundry(
             "server_name": r["server_name"],
             "success": r["success"],
             "description": r.get("description", ""),
+            "output": _normalize_tool_output(r.get("output")),
+            "query": r.get("query"),
+            "command": r.get("command"),
+            "error": r.get("error"),
         })
 
     meta = {
@@ -1311,6 +1352,7 @@ async def _execute_approved_plan_foundry(
         "agent_name": chat_agent.foundry_agent_name,
         "tools_executed": tools_executed,
         "tool_plan_id": tool_plan_id,
+        "suggested_follow_ups": follow_ups,
     }
     return answer, meta
 
@@ -1342,3 +1384,116 @@ def _format_foundry_tool_results(results: list[dict]) -> str:
         parts.append("")
 
     return "\n".join(parts)
+
+
+def _normalize_tool_output(output) -> dict | None:
+    """Normalize tool output for frontend display. Caps table rows to 50."""
+    import json as _json
+    if output is None:
+        return None
+    # Unwrap objects with __dict__
+    if hasattr(output, "__dict__"):
+        output = vars(output)
+    # Dict with columns+rows → table
+    if isinstance(output, dict) and "columns" in output and "rows" in output:
+        rows = output.get("rows") or []
+        total = len(rows)
+        return {
+            "type": "table",
+            "columns": output["columns"],
+            "rows": rows[:50],
+            "row_count": total,
+            "truncated": total > 50,
+        }
+    # Generic dict/list → json
+    if isinstance(output, (dict, list)):
+        try:
+            _json.dumps(output, default=str)
+            return {"type": "json", "data": output}
+        except Exception:
+            return {"type": "text", "content": str(output)[:5000]}
+    # String → text
+    if isinstance(output, str):
+        return {"type": "text", "content": output[:5000], "truncated": len(output) > 5000}
+    return {"type": "text", "content": str(output)[:5000]}
+
+
+def _extract_follow_ups(answer: str) -> tuple[str, list[str]]:
+    """Extract <suggestions>…</suggestions> block from AI answer."""
+    import re
+    match = re.search(r"<suggestions>(.*?)</suggestions>", answer, re.DOTALL)
+    if not match:
+        return answer, []
+    raw = match.group(1).strip().split("\n")
+    suggestions = [s.strip().lstrip("0123456789.-) ").strip() for s in raw if s.strip()][:3]
+    return answer[: match.start()].rstrip(), suggestions
+
+
+async def _auto_execute_and_synthesize(
+    db: AsyncSession,
+    validated: list[dict],
+    history: list[ChatMessage],
+    base_meta: dict,
+) -> tuple[str, dict]:
+    """Execute validated tool calls immediately (no user approval) and synthesize — auto-investigate."""
+    from app.services.chat_tool_registry import execute_chat_tool_call
+    from app.services.azure_foundry_service import _run_chat_completion_with_tools
+
+    results = []
+    for call in validated:
+        function_call = {
+            "name": call.get("_function_name", ""),
+            "arguments": call.get("_arguments", {}),
+        }
+        result = await execute_chat_tool_call(db, function_call)
+        results.append({
+            "type": call.get("type", "unknown"),
+            "server_name": call.get("server_name", ""),
+            "description": call.get("description", ""),
+            "success": result.get("success", False),
+            "output": result.get("output"),
+            "error": result.get("error"),
+            "query": call.get("query"),
+            "command": call.get("command"),
+        })
+
+    user_question = next(
+        (msg.content for msg in reversed(history) if msg.role == "user"),
+        "Investigate this alert",
+    )
+    results_text = _format_foundry_tool_results(results)
+    synth_messages = [
+        {"role": "system", "content": _SYNTHESIS_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": (
+                f"Question: {user_question}\n\nLive diagnostic results:\n{results_text}\n\n"
+                "Synthesize a clear, actionable answer. Quote specific numbers and values."
+            ),
+        },
+    ]
+    try:
+        synthesis_response = await _run_chat_completion_with_tools(synth_messages, tools=None, timeout=120.0)
+        if isinstance(synthesis_response, dict):
+            answer = synthesis_response.get("content") or str(synthesis_response)
+        else:
+            answer = str(synthesis_response) if synthesis_response else results_text
+    except Exception as exc:
+        logger.exception("Auto-investigate synthesis failed: %s", exc)
+        answer = f"Diagnostic data collected:\n\n{results_text}"
+
+    tools_executed = [
+        {
+            "type": r["type"],
+            "server_name": r["server_name"],
+            "success": r["success"],
+            "description": r.get("description", ""),
+            "output": _normalize_tool_output(r.get("output")),
+            "query": r.get("query"),
+            "command": r.get("command"),
+            "error": r.get("error"),
+        }
+        for r in results
+    ]
+    answer, follow_ups = _extract_follow_ups(answer)
+    return answer, {**base_meta, "tools_executed": tools_executed, "suggested_follow_ups": follow_ups}

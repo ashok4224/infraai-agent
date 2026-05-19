@@ -45,6 +45,7 @@ async def send_message(
         context_alert_id=payload.context_alert_id,
         approve_tool_plan=payload.approve_tool_plan,
         tool_plan_id=payload.tool_plan_id,
+        auto_investigate=payload.auto_investigate,
     )
     await db.commit()
 
