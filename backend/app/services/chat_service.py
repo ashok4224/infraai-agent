@@ -353,7 +353,7 @@ async def _execute_approved_plan(
     plan_msg: ChatMessage | None = None
     for msg in plan_result.scalars().all():
         meta = msg.metadata_json or {}
-        tp = meta.get("tool_plan", {})
+        tp = meta.get("tool_plan") or {}
         if tp.get("id") == tool_plan_id:
             plan_msg = msg
             break
@@ -839,11 +839,17 @@ async def _chat_with_foundry(
         )
         chat_agent = result.scalar_one_or_none()
 
-        # ── Branch B: User approved a pending tool plan (only when chat_agent exists) ──
-        if chat_agent and chat_agent.foundry_agent_name and approve_tool_plan and tool_plan_id and session_id:
-            return await _execute_approved_plan_foundry(
-                db, chat_agent, history, context_parts, tool_plan_id, session_id,
-            )
+        # ── Branch B: User approved a pending tool plan ──
+        if approve_tool_plan and tool_plan_id and session_id:
+            if chat_agent and chat_agent.foundry_agent_name:
+                return await _execute_approved_plan_foundry(
+                    db, chat_agent, history, context_parts, tool_plan_id, session_id,
+                )
+            else:
+                # Direct completion mode — execute tools then synthesize via Azure
+                return await _execute_approved_plan_direct_foundry(
+                    db, history, context_parts, tool_plan_id, session_id,
+                )
 
         # If no chat agent configured, fall back to direct Azure AI Foundry chat completion
         # (still uses Azure Foundry endpoint, just without a named agent)
@@ -1095,6 +1101,98 @@ async def _validate_foundry_tool_plan(db: AsyncSession, tool_calls: list[dict]) 
     return valid
 
 
+async def _execute_approved_plan_direct_foundry(
+    db: AsyncSession,
+    history: list[ChatMessage],
+    context_parts: list[str],
+    tool_plan_id: str,
+    session_id,
+) -> tuple[str, dict]:
+    """Execute an approved tool plan in direct Azure completion mode (no named agent)."""
+    from app.services.chat_tool_registry import execute_chat_tool_call
+    from app.services.azure_foundry_service import _run_chat_completion_with_tools
+
+    base_meta = {"provider": "azure_foundry", "agent": "direct", "agent_name": "direct-completion"}
+
+    # Find the assistant message that holds the plan
+    plan_result = await db.execute(
+        select(ChatMessage).where(
+            ChatMessage.session_id == session_id,
+            ChatMessage.role == "assistant",
+        ).order_by(ChatMessage.created_at.desc()).limit(10)
+    )
+    plan_msg: ChatMessage | None = None
+    for msg in plan_result.scalars().all():
+        meta = msg.metadata_json or {}
+        tp = meta.get("tool_plan") or {}
+        if tp.get("id") == tool_plan_id:
+            plan_msg = msg
+            break
+
+    if not plan_msg:
+        return "Could not find the tool plan to execute. Please try asking your question again.", base_meta
+
+    tool_plan = plan_msg.metadata_json.get("tool_plan", {})
+    tool_calls = tool_plan.get("calls", [])
+    if not tool_calls:
+        return "The tool plan has no diagnostics to run.", base_meta
+
+    # Execute all approved tool calls
+    results = []
+    for call in tool_calls:
+        function_call = {
+            "name": call.get("_function_name", ""),
+            "arguments": call.get("_arguments", {}),
+        }
+        result = await execute_chat_tool_call(db, function_call)
+        results.append({
+            "type": call.get("type", "unknown"),
+            "server_name": call.get("server_name", ""),
+            "description": call.get("description", ""),
+            "success": result.get("success", False),
+            "output": result.get("output"),
+            "error": result.get("error"),
+        })
+
+    # Get original user question
+    user_question = ""
+    for msg in reversed(history):
+        if msg.role == "user" and msg.content != "(approved tool execution)":
+            user_question = msg.content
+            break
+
+    results_text = _format_foundry_tool_results(results)
+    synthesis_prompt = (
+        f"The user asked: {user_question}\n\n"
+        f"Live diagnostic results:\n{results_text}\n\n"
+        f"Synthesize a clear, actionable answer based on the actual data above. "
+        f"Quote specific numbers and values. If any tool failed, note it but analyze what is available."
+    )
+
+    messages = [
+        {"role": "system", "content": _SYNTHESIS_SYSTEM_PROMPT},
+        {"role": "user", "content": synthesis_prompt},
+    ]
+
+    try:
+        synthesis_response = await _run_chat_completion_with_tools(messages, tools=None, timeout=120.0)
+        if isinstance(synthesis_response, dict):
+            answer = synthesis_response.get("content", str(synthesis_response))
+        else:
+            answer = synthesis_response
+    except Exception as e:
+        logger.exception("Direct Foundry synthesis failed: %s", e)
+        answer = f"I collected the diagnostic data but had trouble synthesizing it.\n\n{results_text}"
+
+    tools_executed = [
+        {"type": r["type"], "server_name": r["server_name"], "success": r["success"], "description": r.get("description", "")}
+        for r in results
+    ]
+
+    meta = {**base_meta, "tools_executed": tools_executed, "tool_plan_id": tool_plan_id}
+    return answer, meta
+
+
 async def _execute_approved_plan_foundry(
     db: AsyncSession,
     chat_agent,
@@ -1117,7 +1215,7 @@ async def _execute_approved_plan_foundry(
     plan_msg: ChatMessage | None = None
     for msg in plan_result.scalars().all():
         meta = msg.metadata_json or {}
-        tp = meta.get("tool_plan", {})
+        tp = meta.get("tool_plan") or {}
         if tp.get("id") == tool_plan_id:
             plan_msg = msg
             break
