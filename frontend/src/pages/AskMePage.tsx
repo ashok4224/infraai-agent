@@ -228,7 +228,9 @@ export default function AskMePage() {
     if (!activeSessionId) { setMessages([]); setPendingPlan(null); return; }
     api.get(`/chat/sessions/${activeSessionId}`).then(r => {
       setMessages(r.data.messages || []);
-      setPendingPlan(null);
+      // NOTE: do NOT clear pendingPlan here — the tool_plan approval card is set
+      // during streaming and would be wiped by the session-reload triggered when
+      // the new session ID is first assigned (first-message flow).
     }).catch(() => setMessages([]));
   }, [activeSessionId]);
 
@@ -552,7 +554,7 @@ export default function AskMePage() {
             sessions.map(s => (
               <div
                 key={s.id}
-                onClick={() => setActiveSessionId(s.id)}
+                onClick={() => { setPendingPlan(null); setActiveSessionId(s.id); }}
                 className={`group flex items-center justify-between px-3 py-2 rounded-lg cursor-pointer text-sm transition-colors ${
                   activeSessionId === s.id ? 'bg-brand-50 text-brand-700 font-medium' : 'text-gray-600 hover:bg-gray-50'
                 }`}
