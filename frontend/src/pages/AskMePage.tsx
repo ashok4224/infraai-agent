@@ -99,7 +99,7 @@ function ToolResultPanel({ tool }: { tool: ToolExecuted }) {
           <span className="text-xs font-semibold text-gray-700">{tool.server_name}</span>
           {preview && (
             <span className="text-xs text-gray-400 font-mono truncate max-w-xs hidden sm:block">
-              {preview.slice(0, 60)}{preview.length > 60 ? 'â€¦' : ''}
+              {preview.slice(0, 60)}{preview.length > 60 ? '…' : ''}
             </span>
           )}
         </div>
@@ -132,7 +132,7 @@ function ToolResultPanel({ tool }: { tool: ToolExecuted }) {
                     <tr key={ri} className={ri % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
                       {row.map((cell, ci) => (
                         <td key={ci} className="px-3 py-1 text-gray-700 font-mono whitespace-nowrap border-r border-gray-100 last:border-0">
-                          {cell === null || cell === undefined ? <span className="text-gray-300">â€”</span> : String(cell)}
+                          {cell === null || cell === undefined ? <span className="text-gray-300">—</span> : String(cell)}
                         </td>
                       ))}
                     </tr>
@@ -148,7 +148,7 @@ function ToolResultPanel({ tool }: { tool: ToolExecuted }) {
           )}
           {tool.output.type === 'text' && (
             <pre className="text-xs p-3 bg-gray-900 text-green-400 overflow-x-auto max-h-48 whitespace-pre-wrap">
-              {tool.output.content}{tool.output.truncated ? '\nâ€¦ (truncated)' : ''}
+              {tool.output.content}{tool.output.truncated ? '\n… (truncated)' : ''}
             </pre>
           )}
           {tool.output.type === 'json' && (
@@ -577,7 +577,7 @@ export default function AskMePage() {
           {messages.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-full text-gray-400">
               <AlertTriangle className="h-12 w-12 mb-3 text-gray-300" />
-              <p className="text-lg font-medium">AskMe â€” SRE Assistant</p>
+              <p className="text-lg font-medium">AskMe — SRE Assistant</p>
               <p className="text-sm mt-1">Ask about alerts, database issues, infrastructure, or general SRE topics.</p>
               <p className="text-xs mt-2 text-gray-300">I can run live diagnostics with your approval.</p>
               {contextAlertId && contextAlertName && (
@@ -620,7 +620,7 @@ export default function AskMePage() {
               <div className="max-w-[80%] rounded-2xl border-2 border-amber-300 bg-amber-50 px-5 py-4">
                 <div className="flex items-center gap-2 mb-3">
                   <ShieldCheck className="h-5 w-5 text-amber-600" />
-                  <span className="font-semibold text-sm text-amber-800">Diagnostics Plan â€” Approval Required</span>
+                  <span className="font-semibold text-sm text-amber-800">Diagnostics Plan — Approval Required</span>
                 </div>
                 <div className="space-y-2 mb-4">
                   {pendingPlan.calls.map((call, i) => (
@@ -668,7 +668,7 @@ export default function AskMePage() {
             <div className="flex justify-start">
               <div className="bg-amber-50 border border-amber-200 rounded-2xl rounded-bl-md px-4 py-3 flex items-center gap-2">
                 <Loader2 className="h-4 w-4 animate-spin text-amber-600" />
-                <span className="text-sm text-amber-700">Executing diagnostics â€” connecting to systems...</span>
+                <span className="text-sm text-amber-700">Executing diagnostics — connecting to systems...</span>
               </div>
             </div>
           )}
@@ -694,7 +694,7 @@ export default function AskMePage() {
               value={input}
               onChange={e => setInput(e.target.value)}
               onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); } }}
-              placeholder="Ask somethingâ€¦"
+              placeholder="Ask something…"
               rows={1}
               className="flex-1 resize-none rounded-xl border border-gray-300 px-4 py-3 text-sm focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none"
               disabled={sending || executing}
