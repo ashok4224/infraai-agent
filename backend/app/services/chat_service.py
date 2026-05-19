@@ -1177,9 +1177,11 @@ async def _execute_approved_plan_direct_foundry(
     try:
         synthesis_response = await _run_chat_completion_with_tools(messages, tools=None, timeout=120.0)
         if isinstance(synthesis_response, dict):
-            answer = synthesis_response.get("content", str(synthesis_response))
+            answer = synthesis_response.get("content") or synthesis_response.get("text") or str(synthesis_response)
         else:
-            answer = synthesis_response
+            answer = str(synthesis_response) if synthesis_response else results_text
+        if not answer or not answer.strip():
+            answer = f"Here are the live diagnostic results:\n\n{results_text}"
     except Exception as e:
         logger.exception("Direct Foundry synthesis failed: %s", e)
         answer = f"I collected the diagnostic data but had trouble synthesizing it.\n\n{results_text}"
@@ -1309,8 +1311,16 @@ def _format_foundry_tool_results(results: list[dict]) -> str:
 
         if r.get("success"):
             output = r.get("output", "")
+            # Handle boto3 response, DB result dicts, MCPToolCallResponse objects, etc.
+            if hasattr(output, "__dict__"):
+                output = vars(output)
             if isinstance(output, (dict, list)):
-                output = json.dumps(output, indent=2, default=str)
+                try:
+                    output = json.dumps(output, indent=2, default=str)
+                except Exception:
+                    output = str(output)
+            elif output is None:
+                output = "(no data returned)"
             parts.append(f"Result:\n{output}")
         else:
             parts.append(f"FAILED: {r.get('error', 'Unknown error')}")

@@ -394,7 +394,7 @@ async def execute_chat_tool_call(db: AsyncSession, call: dict) -> dict:
             return {"success": False, "error": f"Oracle MCP server '{server_name}' not found", "output": None}
 
         data = await fetch_oracle_data(mcp, sql)
-        return {"success": True, "output": data, "error": None}
+        return {"success": data.get("success", False), "output": data.get("data"), "error": data.get("error")}
 
     elif name.startswith("query_postgres_"):
         server_name = name[len("query_postgres_"):]
@@ -414,9 +414,8 @@ async def execute_chat_tool_call(db: AsyncSession, call: dict) -> dict:
         if not mcp:
             return {"success": False, "error": f"PostgreSQL MCP server '{server_name}' not found", "output": None}
 
-        # Use generic MCP tool call for PostgreSQL
-        data = await call_mcp_tool(mcp, "query", {"sql": sql})
-        return {"success": True, "output": data, "error": None}
+        data = await fetch_oracle_data(mcp, sql)
+        return {"success": data.get("success", False), "output": data.get("data"), "error": data.get("error")}
 
     elif name.startswith("query_mysql_"):
         server_name = name[len("query_mysql_"):]
@@ -436,15 +435,42 @@ async def execute_chat_tool_call(db: AsyncSession, call: dict) -> dict:
         if not mcp:
             return {"success": False, "error": f"MySQL MCP server '{server_name}' not found", "output": None}
 
-        data = await call_mcp_tool(mcp, "query", {"sql": sql})
-        return {"success": True, "output": data, "error": None}
+        data = await fetch_oracle_data(mcp, sql)
+        return {"success": data.get("success", False), "output": data.get("data"), "error": data.get("error")}
 
     elif name.startswith("call_aws_"):
         server_name = name[len("call_aws_"):]
         service = args.get("service", "")
         operation = args.get("operation", "")
-        params = args.get("params", {})
+        params = args.get("params") or {}
+        region = args.get("region") or None
 
+        if not service or not operation:
+            return {"success": False, "error": "AWS call requires 'service' and 'operation'", "output": None}
+
+        # Try direct boto3 first (no MCP subprocess needed)
+        try:
+            import boto3
+            import asyncio as _aio
+
+            def _boto3_call():
+                kwargs = {}
+                if region:
+                    kwargs["region_name"] = region
+                client = boto3.client(service, **kwargs)
+                method = getattr(client, operation)
+                resp = method(**params)
+                resp.pop("ResponseMetadata", None)
+                return resp
+
+            data = await _aio.wait_for(_aio.to_thread(_boto3_call), timeout=30.0)
+            return {"success": True, "output": data, "error": None}
+        except ImportError:
+            pass
+        except Exception as boto_err:
+            logger.warning("Direct boto3 call %s.%s failed: %s — trying MCP", service, operation, boto_err)
+
+        # Fallback: MCP subprocess
         result = await db.execute(
             select(MCPServerConfig).where(
                 MCPServerConfig.is_active == True,
@@ -453,20 +479,20 @@ async def execute_chat_tool_call(db: AsyncSession, call: dict) -> dict:
         )
         mcp = result.scalar_one_or_none()
         if not mcp:
-            return {"success": False, "error": f"AWS MCP server '{server_name}' not found", "output": None}
+            return {"success": False, "error": f"AWS MCP server '{server_name}' not found and boto3 unavailable", "output": None}
 
-        data = await call_mcp_tool(mcp, "execute", {
+        mcp_data = await call_mcp_tool(mcp, "aws_exec", {
             "service": service,
             "operation": operation,
             "params": params,
         })
-        return {"success": True, "output": data, "error": None}
+        return {"success": mcp_data.success, "output": mcp_data.result, "error": mcp_data.error}
 
     elif name.startswith("call_azure_"):
         server_name = name[len("call_azure_"):]
         service = args.get("service", "")
         operation = args.get("operation", "")
-        params = args.get("params", {})
+        params = args.get("params") or {}
 
         result = await db.execute(
             select(MCPServerConfig).where(
@@ -478,19 +504,19 @@ async def execute_chat_tool_call(db: AsyncSession, call: dict) -> dict:
         if not mcp:
             return {"success": False, "error": f"Azure MCP server '{server_name}' not found", "output": None}
 
-        data = await call_mcp_tool(mcp, "execute", {
+        mcp_data = await call_mcp_tool(mcp, "azure_exec", {
             "service": service,
             "operation": operation,
             "params": params,
         })
-        return {"success": True, "output": data, "error": None}
+        return {"success": mcp_data.success, "output": mcp_data.result, "error": mcp_data.error}
 
     elif name.startswith("call_k8s_"):
         server_name = name[len("call_k8s_"):]
-        verb = args.get("verb", "")
-        resource = args.get("resource", "")
+        verb = args.get("verb", "get")
+        resource = args.get("resource", "pods")
         namespace = args.get("namespace", "")
-        extra_args = args.get("extra_args", [])
+        extra_args = args.get("extra_args") or []
 
         result = await db.execute(
             select(MCPServerConfig).where(
@@ -502,13 +528,13 @@ async def execute_chat_tool_call(db: AsyncSession, call: dict) -> dict:
         if not mcp:
             return {"success": False, "error": f"K8s MCP server '{server_name}' not found", "output": None}
 
-        data = await call_mcp_tool(mcp, "execute", {
+        mcp_data = await call_mcp_tool(mcp, "k8s_exec", {
             "verb": verb,
             "resource": resource,
             "namespace": namespace,
             "extra_args": extra_args,
         })
-        return {"success": True, "output": data, "error": None}
+        return {"success": mcp_data.success, "output": mcp_data.result, "error": mcp_data.error}
 
     elif name.startswith("query_mongodb_"):
         server_name = name[len("query_mongodb_"):]
@@ -524,8 +550,8 @@ async def execute_chat_tool_call(db: AsyncSession, call: dict) -> dict:
         if not mcp:
             return {"success": False, "error": f"MongoDB MCP server '{server_name}' not found", "output": None}
 
-        data = await call_mcp_tool(mcp, "query", {"command": command})
-        return {"success": True, "output": data, "error": None}
+        mcp_data = await call_mcp_tool(mcp, "query", {"command": command})
+        return {"success": mcp_data.success, "output": mcp_data.result, "error": mcp_data.error}
 
     elif name.startswith("run_ssh_"):
         server_name = name[len("run_ssh_"):]
