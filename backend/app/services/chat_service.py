@@ -675,24 +675,7 @@ async def _chat_with_foundry(
         from app.models.foundry_config import FoundryAgentConfig
         from app.services.chat_tool_registry import build_chat_tools, execute_chat_tool_call
 
-        # Find the chat agent
-        result = await db.execute(
-            select(FoundryAgentConfig).where(
-                FoundryAgentConfig.role == "chat",
-                FoundryAgentConfig.is_active == True,
-            )
-        )
-        chat_agent = result.scalar_one_or_none()
-        if not chat_agent or not chat_agent.foundry_agent_name:
-            return "Azure AI Foundry chat agent is not configured. Please set it up in Foundry Configuration.", {}
-
-        # ── Branch B: User approved a pending tool plan ──
-        if approve_tool_plan and tool_plan_id and session_id:
-            return await _execute_approved_plan_foundry(
-                db, chat_agent, history, context_parts, tool_plan_id, session_id,
-            )
-
-        # ── Branch A: Normal message → plan tools if needed ──
+        # Build messages first (needed for both named agent and direct completion paths)
         messages = [{"role": "system", "content": _CHAT_SYSTEM_PROMPT}]
         if context_parts:
             messages.append({"role": "user", "content": "\n".join(context_parts)})
@@ -702,6 +685,80 @@ async def _chat_with_foundry(
         # Build available tools
         tools = await build_chat_tools(db)
 
+        # Find the chat agent
+        result = await db.execute(
+            select(FoundryAgentConfig).where(
+                FoundryAgentConfig.role == "chat",
+                FoundryAgentConfig.is_active == True,
+            )
+        )
+        chat_agent = result.scalar_one_or_none()
+
+        # ── Branch B: User approved a pending tool plan (only when chat_agent exists) ──
+        if chat_agent and chat_agent.foundry_agent_name and approve_tool_plan and tool_plan_id and session_id:
+            return await _execute_approved_plan_foundry(
+                db, chat_agent, history, context_parts, tool_plan_id, session_id,
+            )
+
+        # If no chat agent configured, fall back to direct Azure AI Foundry chat completion
+        # (still uses Azure Foundry endpoint, just without a named agent)
+        if not chat_agent or not chat_agent.foundry_agent_name:
+            logger.info("No chat agent found in foundry_agent_configs — using direct Azure AI Foundry completion")
+            from app.services.azure_foundry_service import _run_chat_completion_with_tools
+
+            response = await _run_chat_completion_with_tools(
+                messages,
+                tools=tools if tools else None,
+                timeout=120.0,
+            )
+
+            base_meta = {
+                "provider": "azure_foundry",
+                "agent": "direct",
+                "agent_name": "direct-completion",
+            }
+
+            # Handle text response (no tools needed)
+            if isinstance(response, str):
+                return response, base_meta
+
+            if isinstance(response, dict) and response.get("type") == "message":
+                return response.get("content", ""), base_meta
+
+            # Handle tool calls response
+            if isinstance(response, dict) and response.get("type") == "tool_calls":
+                tool_calls_raw = response.get("tool_calls", [])[:_MAX_TOOL_CALLS]
+
+                # Validate tool calls
+                validated = await _validate_foundry_tool_plan(db, tool_calls_raw)
+                if not validated:
+                    logger.info("All Foundry tool calls failed validation — falling back to chat")
+                    response_text = await _run_chat_completion_with_tools(messages, tools=None, timeout=120.0)
+                    if isinstance(response_text, dict):
+                        response_text = response_text.get("content", str(response_text))
+                    return response_text, base_meta
+
+                explanation = (
+                    "I need to run some diagnostics to answer your question. "
+                    f"Planned {len(validated)} tool call(s)."
+                )
+
+                plan_id = str(_uuid.uuid4())
+                tool_plan = {
+                    "id": plan_id,
+                    "explanation": explanation,
+                    "calls": validated,
+                    "status": "pending",
+                }
+
+                meta = {**base_meta, "tool_plan": tool_plan}
+                return explanation, meta
+
+            # Unknown response type
+            logger.warning("Unexpected Foundry response type: %s", type(response))
+            return str(response), base_meta
+
+        # ── Branch A: Normal message → plan tools if needed (chat_agent exists) ──
         # Call Azure with tools
         response = await run_agent(
             chat_agent.foundry_agent_name,

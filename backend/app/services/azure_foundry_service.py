@@ -146,7 +146,7 @@ async def _run_chat_completion(messages: list[dict], timeout: float = 120.0) -> 
 
 async def _run_chat_completion_with_tools(
     messages: list[dict],
-    tools: list[dict],
+    tools: list[dict] | None = None,
     timeout: float = 120.0,
 ) -> dict:
     """Run a chat completion with function calling support.
