@@ -62,7 +62,7 @@ Available tool types:
 - PostgreSQL         → type="postgres",   include "query" (SELECT only)
 - MySQL              → type="mysql",      include "query" (SELECT only)
 - Linux SSH servers  → type="ssh",        include "command" (safe read-only commands)
-- AWS cloud          → type="aws",        include "service" (eks/ec2/rds/cloudwatch/s3/lambda), "operation", and "params" dict with ALL required fields for that operation (e.g. EKS list_nodegroups REQUIRES {{"clusterName":"<name>"}}, describe_cluster REQUIRES {{"name":"<name>"}}, describe_nodegroup REQUIRES {{"clusterName":"<name>","nodegroupName":"<ng>"}})
+- AWS cloud          → type="aws",        include "service" (eks/ec2/rds/cloudwatch/s3/lambda), "operation", "region" (e.g. "ap-south-1") as a TOP-LEVEL field (NEVER inside params), and "params" dict with operation-specific fields (EKS list_clusters: params={{}}, list_nodegroups REQUIRES {{"clusterName":"<name>"}}, describe_cluster REQUIRES {{"name":"<name>"}})
 - Kubernetes         → type="kubernetes", include "verb" (get/describe/logs/top), "resource", optionally "namespace" and "extra_args"
 
 RULES:
@@ -104,6 +104,7 @@ Respond ONLY with valid JSON (no markdown fences):
       "server_name": "<exact AWS server name>",
       "service": "eks",
       "operation": "list_nodegroups",
+      "region": "ap-south-1",
       "params": {{"clusterName": "<cluster-name>"}},
       "description": "<what this checks>"
     }},
@@ -710,11 +711,13 @@ async def _execute_tool_calls(db: AsyncSession, tool_calls: list[dict]) -> list[
 
                 service = call.get("service", "")
                 operation = call.get("operation", "")
-                params = call.get("params") or {}
+                params = dict(call.get("params") or {})
+                # region is a client-level arg; strip it from params if AI put it there
+                region = call.get("region") or params.pop("region", None) or params.pop("Region", None)
                 if not service or not operation:
                     return {**base, "success": False, "error": "AWS call requires 'service' and 'operation'"}
 
-                data = await _aws_exec_tool(str(config.id), service=service, operation=operation, params=params)
+                data = await _aws_exec_tool(str(config.id), service=service, operation=operation, params=params, region=region)
                 return {**base, "success": data.get("success", False), "output": data.get("data"), "error": data.get("error")}
 
             elif call_type == "kubernetes":

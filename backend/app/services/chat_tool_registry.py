@@ -204,14 +204,13 @@ def _build_aws_tool_schema(mcp: MCPServerConfig) -> dict:
             "description": (
                 f"Call AWS API via MCP server '{mcp.name}'. "
                 f"Supports EC2, EKS, CloudWatch, RDS, and other AWS services. "
-                f"IMPORTANT: Many operations require params — always include them. "
-                f"EKS examples: list_nodegroups requires {{\"clusterName\": \"<name>\"}}, "
-                f"describe_nodegroup requires {{\"clusterName\": \"<name>\", \"nodegroupName\": \"<ng>\"}}, "
-                f"describe_cluster requires {{\"name\": \"<cluster-name>\"}}. "
-                f"EC2 examples: describe_instances with {{\"Filters\": [...]}}, "
-                f"describe_instance_status with {{\"InstanceIds\": [\"i-xxxx\"]}}. "
-                f"CloudWatch examples: get_metric_statistics requires Namespace, MetricName, Dimensions, StartTime, EndTime, Period, Statistics. "
-                f"Always populate 'params' with the required fields for the chosen operation."
+                f"IMPORTANT: Use 'region' (top-level, e.g. 'ap-south-1') for the AWS region — do NOT put region inside params. "
+                f"Many operations also require params: "
+                f"EKS list_clusters: params={{}}, region='ap-south-1'. "
+                f"EKS list_nodegroups: params={{\"clusterName\": \"<name>\"}}, region='ap-south-1'. "
+                f"EKS describe_cluster: params={{\"name\": \"<cluster-name>\"}}, region='ap-south-1'. "
+                f"EC2 describe_instances: params={{\"Filters\": [...]}}, region='ap-south-1'. "
+                f"Always set 'region' at the top level, never inside 'params'."
             ),
             "parameters": {
                 "type": "object",
@@ -224,24 +223,30 @@ def _build_aws_tool_schema(mcp: MCPServerConfig) -> dict:
                     "operation": {
                         "type": "string",
                         "description": (
-                            "AWS API operation in snake_case, e.g. list_nodegroups, describe_cluster, "
-                            "describe_instances, get_metric_statistics. "
-                            "Check AWS docs for required params and always pass them in 'params'."
+                            "AWS API operation in snake_case, e.g. list_clusters, list_nodegroups, "
+                            "describe_cluster, describe_instances, get_metric_statistics."
                         ),
                     },
                     "params": {
                         "type": "object",
                         "description": (
-                            "Parameters for the AWS API call. "
-                            "Required for most operations — do NOT leave empty when the operation needs them. "
-                            "EKS list_nodegroups: {\"clusterName\": \"infraai-dev\"}. "
-                            "EKS describe_nodegroup: {\"clusterName\": \"infraai-dev\", \"nodegroupName\": \"<ng>\"}. "
-                            "EKS describe_cluster: {\"name\": \"infraai-dev\"}."
+                            "API call parameters — do NOT include region here. "
+                            "list_clusters: {} (empty). "
+                            "list_nodegroups: {\"clusterName\": \"<name>\"}. "
+                            "describe_cluster: {\"name\": \"<cluster-name>\"}.  "
+                            "describe_nodegroup: {\"clusterName\": \"<name>\", \"nodegroupName\": \"<ng>\"}."
                         ),
                         "default": {},
                     },
+                    "region": {
+                        "type": "string",
+                        "description": (
+                            "AWS region code, e.g. ap-south-1, us-east-1, eu-west-1. "
+                            "ALWAYS set this — do not put region inside params."
+                        ),
+                    },
                 },
-                "required": ["service", "operation"],
+                "required": ["service", "operation", "region"],
                 "additionalProperties": False,
             },
         },
@@ -499,8 +504,9 @@ async def execute_chat_tool_call(db: AsyncSession, call: dict) -> dict:
         server_name = name[len("call_aws_"):]
         service = args.get("service", "")
         operation = args.get("operation", "")
-        params = args.get("params") or {}
-        region = args.get("region") or None
+        params = dict(args.get("params") or {})
+        # region must go to the client constructor, not the API call params
+        region = args.get("region") or params.pop("region", None) or params.pop("Region", None)
 
         if not service or not operation:
             return {"success": False, "error": "AWS call requires 'service' and 'operation'", "output": None}
