@@ -128,10 +128,10 @@ Guidelines:
 # ---------------------------------------------------------------------------
 
 async def get_ai_mode(db: AsyncSession) -> str:
-    """Read the current AI mode from app settings."""
+    """Read the current AI mode from app settings (defaults to azure_foundry)."""
     result = await db.execute(select(AppSetting).where(AppSetting.key == "ai_mode"))
     setting = result.scalar_one_or_none()
-    return (setting.value if setting else "builtin").strip().lower()
+    return (setting.value if setting else "azure_foundry").strip().lower()
 
 
 async def process_chat(
@@ -156,9 +156,8 @@ async def process_chat(
         )
         session = result.scalar_one_or_none()
 
-    # Use the session's stored mode to avoid mid-conversation mode drift
-    if session:
-        ai_mode = session.ai_mode
+    # Always use azure_foundry — override any stale stored mode on existing sessions
+    ai_mode = "azure_foundry"
 
     if not session:
         title = message[:80].strip() or "New Chat"
@@ -210,23 +209,15 @@ async def process_chat(
     )
     history_msgs = list(reversed(history_result.scalars().all()))
 
-    # ── Dispatch to AI mode ──
+    # ── Dispatch — always through Azure AI Foundry ──
     start_time = time.time()
 
-    if ai_mode == "azure_foundry":
-        response_text, metadata = await _chat_with_foundry(
-            db, history_msgs, context_parts,
-            approve_tool_plan=approve_tool_plan,
-            tool_plan_id=tool_plan_id,
-            session_id=session.id,
-        )
-    else:
-        response_text, metadata = await _chat_with_builtin(
-            db, history_msgs, context_parts,
-            approve_tool_plan=approve_tool_plan,
-            tool_plan_id=tool_plan_id,
-            session_id=session.id,
-        )
+    response_text, metadata = await _chat_with_foundry(
+        db, history_msgs, context_parts,
+        approve_tool_plan=approve_tool_plan,
+        tool_plan_id=tool_plan_id,
+        session_id=session.id,
+    )
 
     metadata["latency_ms"] = int((time.time() - start_time) * 1000)
     metadata["ai_mode"] = ai_mode
