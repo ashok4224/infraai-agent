@@ -87,20 +87,29 @@ def handle_tools_call(params: dict) -> dict:
         else:
             result = method()
 
-        # Convert result to serializable dict
-        if hasattr(result, '__dict__'):
-            import datetime as _dt
-            def _serialize(obj):
-                if hasattr(obj, 'isoformat'):
-                    return obj.isoformat()
-                if isinstance(obj, (_dt.datetime, _dt.date)):
-                    return obj.isoformat()
-                if isinstance(obj, bytes):
-                    return obj.decode("utf-8", errors="replace")
-                return str(obj)
+        # Strip AWS metadata noise before serializing
+        if isinstance(result, dict):
+            result.pop("ResponseMetadata", None)
+
+        # Always serialize through JSON with a datetime-safe encoder.
+        # boto3 responses are plain dicts (hasattr __dict__ == False) so we
+        # must apply the default= handler unconditionally.
+        import datetime as _dt
+
+        def _serialize(obj):
+            if hasattr(obj, "isoformat"):          # datetime, date, time
+                return obj.isoformat()
+            if isinstance(obj, bytes):
+                return obj.decode("utf-8", errors="replace")
+            return str(obj)
+
+        try:
             serialized = json.loads(json.dumps(result, default=_serialize))
-        else:
-            serialized = result
+        except Exception as se:
+            return {"content": [{"type": "text", "text": json.dumps({
+                "success": False, "error": f"Serialization error: {se}",
+                "service": service, "operation": operation,
+            })}]}
 
         return {"content": [{"type": "text", "text": json.dumps({"success": True, "data": serialized})}]}
 
