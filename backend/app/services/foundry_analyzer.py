@@ -53,6 +53,19 @@ async def analyze_alert_with_foundry(alert_id: str, analyst_hint: str | None = N
                 logger.error("Alert %s not found for Foundry analysis", alert_id)
                 return
 
+            # ── Guard: skip if another instance already started or finished analysis ──
+            if alert.analysis_status in ("analyzing", "analyzed"):
+                logger.info("Alert %s is already %s — skipping duplicate analysis run", alert_id, alert.analysis_status)
+                return
+
+            # ── Guard: skip if an analysis record already exists ──
+            existing = await db.execute(select(AlertAnalysis).where(AlertAnalysis.alert_id == alert.id))
+            if existing.scalar_one_or_none():
+                logger.info("Alert %s already has an analysis record — marking analyzed and skipping", alert_id)
+                alert.analysis_status = "analyzed"
+                await db.commit()
+                return
+
             alert.analysis_status = "analyzing"
             await db.commit()
 
@@ -277,6 +290,21 @@ async def analyze_alert_with_foundry(alert_id: str, analyst_hint: str | None = N
             logger.info("Alert %s analyzed via Azure AI Foundry pipeline — agents: %s", alert_id, alert.matched_agent_name)
 
         except Exception as e:
+            from sqlalchemy.exc import IntegrityError
+            # If a concurrent run already saved the analysis, treat this as success
+            if isinstance(e, IntegrityError) and "alert_analyses" in str(e):
+                logger.warning("Alert %s — duplicate analysis insert blocked (concurrent run already saved it); marking analyzed", alert_id)
+                try:
+                    async with async_session() as _recovery_db:
+                        from sqlalchemy import select as _select
+                        _res = await _recovery_db.execute(_select(Alert).where(Alert.id == alert_id))
+                        _alert = _res.scalar_one_or_none()
+                        if _alert:
+                            _alert.analysis_status = "analyzed"
+                            await _recovery_db.commit()
+                except Exception:
+                    pass
+                return
             logger.exception("Foundry pipeline error for alert %s: %s", alert_id, e)
             # Use a fresh session — the original session may be in a broken state
             try:
