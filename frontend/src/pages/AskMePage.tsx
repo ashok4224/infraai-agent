@@ -457,6 +457,15 @@ export default function AskMePage() {
     const toolsExecuted = msg.metadata_json?.tools_executed;
     const followUps = msg.metadata_json?.suggested_follow_ups;
 
+    // Strip <suggestions>...</suggestions> block (backend includes it in streamed tokens
+    // but also parses it into suggested_follow_ups; we never want the raw XML visible).
+    // During streaming the closing tag may not have arrived yet, so we also truncate
+    // at the opening tag if no closing tag is present.
+    const suggestionsOpen = content.indexOf('<suggestions>');
+    const cleanContent = suggestionsOpen !== -1
+      ? content.slice(0, suggestionsOpen).trimEnd()
+      : content;
+
     return (
       <div className="space-y-1 text-sm">
         {toolsExecuted && toolsExecuted.length > 0 && (
@@ -467,7 +476,6 @@ export default function AskMePage() {
         <ReactMarkdown
           remarkPlugins={[remarkGfm]}
           components={{
-            h1: ({ children }) => <h1 className="text-base font-bold text-gray-900 mt-4 mb-1.5 first:mt-0">{children}</h1>,
             h2: ({ children }) => <h2 className="text-sm font-bold text-gray-900 mt-3 mb-1 first:mt-0">{children}</h2>,
             h3: ({ children }) => <h3 className="text-sm font-semibold text-gray-800 mt-2 mb-1 first:mt-0 border-b border-gray-100 pb-0.5">{children}</h3>,
             h4: ({ children }) => <h4 className="text-xs font-semibold text-gray-700 mt-1.5 mb-0.5 uppercase tracking-wide">{children}</h4>,
@@ -510,7 +518,7 @@ export default function AskMePage() {
             tr: ({ children }) => <tr className="border-t border-gray-100 even:bg-gray-50">{children}</tr>,
           }}
         >
-          {content}
+          {cleanContent}
         </ReactMarkdown>
         {followUps && followUps.length > 0 && (
           <div className="mt-3 pt-3 border-t border-gray-200 flex flex-wrap gap-2">
