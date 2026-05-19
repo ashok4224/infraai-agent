@@ -406,17 +406,13 @@ async def _k8s_exec_tool(config_id: str, verb: str, resource: str, namespace: st
         data = await _aio.wait_for(_aio.to_thread(_k8s_call), timeout=30.0)
         return {"success": True, "data": data}
     except ImportError:
-        logger.warning("kubernetes Python client not available — falling back to MCP subprocess")
+        return {"success": False, "error": "kubernetes Python client is not installed (pip install kubernetes)"}
     except Exception as k8s_err:
-        logger.warning("Kubernetes Python client call failed (%s) — falling back to MCP subprocess", k8s_err)
-
-    # Fallback: MCP subprocess (requires kubectl in PATH)
-    tool_args = {"verb": verb, "resource": resource}
-    if namespace:
-        tool_args["namespace"] = namespace
-    if extra_args:
-        tool_args["extra_args"] = extra_args
-    return await _mcp_call_tool(config_id, "k8s_exec", tool_args)
+        # Return real error — do NOT fall back to kubectl subprocess
+        err_str = str(k8s_err)
+        if "403" in err_str or "Forbidden" in err_str:
+            return {"success": False, "error": f"Kubernetes RBAC permission denied: {err_str}"}
+        return {"success": False, "error": f"Kubernetes query failed: {err_str}"}
 
 
 

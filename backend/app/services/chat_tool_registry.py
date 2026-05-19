@@ -586,7 +586,7 @@ async def execute_chat_tool_call(db: AsyncSession, call: dict) -> dict:
         server_name = name[len("call_k8s_"):]
         verb = args.get("verb", "get")
         resource = args.get("resource", "pods")
-        namespace = args.get("namespace", "")
+        namespace = args.get("namespace", "") or None
         extra_args = args.get("extra_args") or []
 
         result = await db.execute(
@@ -599,14 +599,11 @@ async def execute_chat_tool_call(db: AsyncSession, call: dict) -> dict:
         if not mcp:
             return {"success": False, "error": f"K8s MCP server '{server_name}' not found", "output": None}
 
-        mcp_data = await call_mcp_tool(mcp, "k8s_exec", {
-            "verb": verb,
-            "resource": resource,
-            "namespace": namespace,
-            "extra_args": extra_args,
-        })
-        output = _unwrap_mcp_output(mcp_data.result)
-        return {"success": mcp_data.success, "output": output, "error": mcp_data.error}
+        # Use the Python kubernetes client directly (no kubectl binary needed)
+        from app.services.tool_registry import _k8s_exec_tool
+        data = await _k8s_exec_tool(str(mcp.id), verb=verb, resource=resource,
+                                    namespace=namespace, extra_args=extra_args)
+        return {"success": data.get("success", False), "output": data.get("data"), "error": data.get("error")}
 
     elif name.startswith("query_mongodb_"):
         server_name = name[len("query_mongodb_"):]

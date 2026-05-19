@@ -1,0 +1,51 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: infraai-readonly
+rules:
+  - apiGroups: [""]
+    resources:
+      - nodes
+      - pods
+      - pods/log
+      - services
+      - endpoints
+      - namespaces
+      - events
+      - persistentvolumes
+      - persistentvolumeclaims
+      - configmaps
+      - resourcequotas
+      - limitranges
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources:
+      - deployments
+      - replicasets
+      - daemonsets
+      - statefulsets
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["batch"]
+    resources:
+      - jobs
+      - cronjobs
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources:
+      - nodes
+      - pods
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: infraai-readonly-binding
+subjects:
+  - kind: ServiceAccount
+    name: default
+    namespace: infraai
+roleRef:
+  kind: ClusterRole
+  name: infraai-readonly
+  apiGroup: rbac.authorization.k8s.io
