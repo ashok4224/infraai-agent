@@ -182,6 +182,7 @@ export default function AskMePage() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
+  const [streamingId, setStreamingId] = useState<string | null>(null);
   const [loadingSessions, setLoadingSessions] = useState(true);
   const [pendingPlan, setPendingPlan] = useState<{ planId: string; calls: ToolCallItem[]; explanation: string; sessionId: string } | null>(null);
   const [executing, setExecuting] = useState(false);
@@ -220,60 +221,145 @@ export default function AskMePage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [shouldAutoInvestigate, contextAlertId, contextAlertName, autoTriggered]);
 
+  // ── SSE streaming helper ──────────────────────────────────────────────────
+  const streamSseChat = async (
+    body: Record<string, unknown>,
+    streamMsgId: string,
+    onToolPlan: (plan: ToolPlan, sessionId: string) => void,
+    onDone: (sessionId: string, messageId: string, metadataJson: ChatMessage['metadata_json']) => void,
+  ) => {
+    const token = localStorage.getItem('token');
+    const response = await fetch('/api/chat/stream', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(errText || `HTTP ${response.status}`);
+    }
+
+    const reader = response.body!.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let accText = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const parts = buffer.split('\n\n');
+      buffer = parts.pop() ?? '';
+
+      for (const part of parts) {
+        if (!part.trim()) continue;
+        let eventType = 'message';
+        let dataStr = '';
+        for (const line of part.split('\n')) {
+          if (line.startsWith('event: ')) eventType = line.slice(7).trim();
+          if (line.startsWith('data: ')) dataStr = line.slice(6).trim();
+        }
+        if (!dataStr) continue;
+        let payload: Record<string, unknown>;
+        try { payload = JSON.parse(dataStr); } catch { continue; }
+
+        if (eventType === 'token' && typeof payload.text === 'string') {
+          accText += payload.text;
+          setMessages(prev => prev.map(m =>
+            m.id === streamMsgId ? { ...m, content: accText } : m
+          ));
+          setSending(false); // hide spinner once first token arrives
+        } else if (eventType === 'tool_running') {
+          const { index, total, description, type: tType, server_name } = payload as Record<string, unknown>;
+          setMessages(prev => prev.map(m =>
+            m.id === streamMsgId
+              ? { ...m, content: `🔍 Diagnostic ${Number(index) + 1}/${total} — ${tType} on ${server_name}: ${description}` }
+              : m
+          ));
+        } else if (eventType === 'tool_done') {
+          // tool_done events are informational; synthesis tokens follow
+        } else if (eventType === 'tool_plan') {
+          const plan = payload.plan as ToolPlan;
+          const sid = (payload.session_id as string) || '';
+          // Remove the placeholder streaming message — plan card replaces it
+          setMessages(prev => prev.filter(m => m.id !== streamMsgId));
+          onToolPlan(plan, sid);
+        } else if (eventType === 'done') {
+          const { session_id, message_id, metadata_json } = payload as {
+            session_id: string; message_id: string; metadata_json: ChatMessage['metadata_json'];
+          };
+          setMessages(prev => prev.map(m =>
+            m.id === streamMsgId
+              ? { ...m, id: message_id || streamMsgId, content: accText || m.content, metadata_json: metadata_json ?? {} }
+              : m
+          ));
+          setStreamingId(null);
+          onDone(session_id, message_id, metadata_json);
+        } else if (eventType === 'error') {
+          const msg = (payload.message as string) || 'Unknown error';
+          setMessages(prev => prev.map(m =>
+            m.id === streamMsgId ? { ...m, content: `Error: ${msg}` } : m
+          ));
+          setStreamingId(null);
+          throw new Error(msg);
+        }
+      }
+    }
+  };
+
   const doSendMessage = async (text: string, autoInv = false) => {
     if (!text.trim() || sending) return;
     setSending(true);
     setPendingPlan(null);
 
-    const tempMsg: ChatMessage = { id: 'temp', role: 'user', content: text, created_at: new Date().toISOString() };
-    setMessages(prev => [...prev, tempMsg]);
+    const userMsgId = generateUUID();
+    const streamMsgId = generateUUID();
+    setMessages(prev => [
+      ...prev,
+      { id: userMsgId, role: 'user', content: text, created_at: new Date().toISOString() },
+      { id: streamMsgId, role: 'assistant', content: '', created_at: new Date().toISOString() },
+    ]);
+    setStreamingId(streamMsgId);
 
     try {
-      const res = await api.post('/chat/', {
-        session_id: activeSessionId,
-        message: text,
-        context_alert_id: contextAlertId || undefined,
-        auto_investigate: autoInv,
-      });
-      const { session_id, message, tool_plan, metadata_json } = res.data;
-
-      if (!activeSessionId || session_id !== activeSessionId) {
-        setActiveSessionId(session_id);
-        const sessRes = await api.get('/chat/sessions');
-        setSessions(sessRes.data);
-      }
-
-      const assistantMsg: ChatMessage = {
-        id: generateUUID(),
-        role: 'assistant',
-        content: message,
-        metadata_json: metadata_json || {},
-        created_at: new Date().toISOString(),
-      };
-
-      setMessages(prev => [
-        ...prev.filter(m => m.id !== 'temp'),
-        { ...tempMsg, id: generateUUID() },
-        assistantMsg,
-      ]);
-
-      if (tool_plan && tool_plan.calls?.length > 0) {
-        setPendingPlan({
-          planId: tool_plan.id,
-          calls: tool_plan.calls,
-          explanation: tool_plan.explanation || message,
-          sessionId: session_id,
-        });
-      }
+      await streamSseChat(
+        {
+          session_id: activeSessionId,
+          message: text,
+          context_alert_id: contextAlertId || undefined,
+          auto_investigate: autoInv,
+        },
+        streamMsgId,
+        (plan, sid) => {
+          if (sid && sid !== activeSessionId) setActiveSessionId(sid);
+          setPendingPlan({ planId: plan.id, calls: plan.calls, explanation: plan.explanation, sessionId: sid || activeSessionId || '' });
+        },
+        async (sessionId) => {
+          if (sessionId && sessionId !== activeSessionId) {
+            setActiveSessionId(sessionId);
+            const sessRes = await api.get('/chat/sessions');
+            setSessions(sessRes.data);
+          } else if (!activeSessionId) {
+            const sessRes = await api.get('/chat/sessions');
+            setSessions(sessRes.data);
+            setActiveSessionId(sessionId);
+          }
+        },
+      );
     } catch (err: unknown) {
       const errorMsg = err instanceof Error ? err.message : 'Failed to send message';
-      setMessages(prev => [
-        ...prev.filter(m => m.id !== 'temp'),
-        { ...tempMsg, id: generateUUID() },
-        { id: 'err', role: 'assistant', content: `Error: ${errorMsg}`, created_at: new Date().toISOString() },
-      ]);
+      setMessages(prev => prev.map(m =>
+        m.id === streamMsgId ? { ...m, content: `Error: ${errorMsg}` } : m
+      ));
+      setStreamingId(null);
     } finally {
       setSending(false);
+      setStreamingId(null);
     }
   };
 
@@ -287,34 +373,37 @@ export default function AskMePage() {
   const handleApprovePlan = async () => {
     if (!pendingPlan || executing) return;
     setExecuting(true);
+
+    const streamMsgId = generateUUID();
+    setMessages(prev => [
+      ...prev,
+      { id: streamMsgId, role: 'assistant', content: '', created_at: new Date().toISOString() },
+    ]);
+    setStreamingId(streamMsgId);
+    setPendingPlan(null);
+
     try {
-      const res = await api.post('/chat/', {
-        session_id: pendingPlan.sessionId,
-        message: '(approved tool execution)',
-        approve_tool_plan: true,
-        tool_plan_id: pendingPlan.planId,
-        context_alert_id: contextAlertId || undefined,
-      });
-      const { message, metadata_json } = res.data;
-      setMessages(prev => [
-        ...prev,
+      await streamSseChat(
         {
-          id: generateUUID(),
-          role: 'assistant',
-          content: message,
-          metadata_json: metadata_json || {},
-          created_at: new Date().toISOString(),
+          session_id: pendingPlan.sessionId,
+          message: '(approved tool execution)',
+          approve_tool_plan: true,
+          tool_plan_id: pendingPlan.planId,
+          context_alert_id: contextAlertId || undefined,
         },
-      ]);
-      setPendingPlan(null);
+        streamMsgId,
+        () => { /* tool_plan during approval is unexpected, ignore */ },
+        async () => { /* session already active */ },
+      );
     } catch (err: unknown) {
       const errorMsg = err instanceof Error ? err.message : 'Execution failed';
-      setMessages(prev => [
-        ...prev,
-        { id: 'exec-err', role: 'assistant', content: `Error executing diagnostics: ${errorMsg}`, created_at: new Date().toISOString() },
-      ]);
+      setMessages(prev => prev.map(m =>
+        m.id === streamMsgId ? { ...m, content: `Error executing diagnostics: ${errorMsg}` } : m
+      ));
+      setStreamingId(null);
     } finally {
       setExecuting(false);
+      setStreamingId(null);
     }
   };
 
@@ -512,7 +601,14 @@ export default function AskMePage() {
                       : 'bg-gray-100 text-gray-800 rounded-bl-md'
                   }`}
                 >
-                  {msg.role === 'assistant' ? renderAssistantContent(msg.content, msg) : msg.content}
+                  {msg.role === 'assistant' ? (
+                    <>
+                      {renderAssistantContent(msg.content, msg)}
+                      {streamingId === msg.id && (
+                        <span className="inline-block w-2 h-4 bg-gray-500 ml-0.5 animate-pulse align-middle" />
+                      )}
+                    </>
+                  ) : msg.content}
                 </div>
               </div>
             ))
@@ -577,12 +673,12 @@ export default function AskMePage() {
             </div>
           )}
 
-          {sending && (
+          {sending && !streamingId && (
             <div className="flex justify-start">
               <div className="bg-gray-100 rounded-2xl rounded-bl-md px-4 py-3 flex items-center gap-2">
                 <Loader2 className="h-4 w-4 animate-spin text-gray-500" />
                 <span className="text-sm text-gray-500">
-                  {shouldAutoInvestigate && !autoTriggered ? 'Auto-investigatingâ€¦' : 'Thinkingâ€¦'}
+                  {shouldAutoInvestigate && !autoTriggered ? 'Auto-investigating…' : 'Thinking…'}
                 </span>
               </div>
             </div>

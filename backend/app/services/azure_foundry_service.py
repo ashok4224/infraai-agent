@@ -205,6 +205,79 @@ async def _run_chat_completion_with_tools(
         await client.close()
 
 
+async def stream_chat_with_tools(
+    messages: list[dict],
+    tools: list[dict] | None = None,
+    timeout: float = 120.0,
+):
+    """Async generator — yields text token dicts or a single tool_calls dict.
+
+    Yields:
+        {"type": "token", "text": "..."}           — a text chunk from the AI
+        {"type": "tool_calls", "tool_calls": [...]} — the model chose to call functions
+    """
+    import json as _json
+
+    client = _make_direct_openai_client()
+    model = settings.AZURE_AI_FOUNDRY_MODEL_DEPLOYMENT or "gpt-4o"
+
+    create_kwargs: dict = {
+        "model": model,
+        "messages": messages,
+        "temperature": 0.4,
+        "max_tokens": 4096,
+        "stream": True,
+    }
+    if tools:
+        create_kwargs["tools"] = tools
+        create_kwargs["tool_choice"] = "auto"
+
+    try:
+        async with asyncio.timeout(timeout):
+            stream = await client.chat.completions.create(**create_kwargs)
+
+            # Accumulate tool-call deltas (streamed piece by piece)
+            tool_calls_acc: list[dict] = []
+
+            async for chunk in stream:
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
+
+                # Text token — yield immediately for real-time streaming
+                if delta.content:
+                    yield {"type": "token", "text": delta.content}
+
+                # Tool-call delta — accumulate across chunks
+                if getattr(delta, "tool_calls", None):
+                    for tc_delta in delta.tool_calls:
+                        idx = tc_delta.index
+                        while len(tool_calls_acc) <= idx:
+                            tool_calls_acc.append({"name": "", "arguments_str": ""})
+                        if tc_delta.function:
+                            if tc_delta.function.name:
+                                tool_calls_acc[idx]["name"] += tc_delta.function.name
+                            if tc_delta.function.arguments:
+                                tool_calls_acc[idx]["arguments_str"] += tc_delta.function.arguments
+
+            # Emit accumulated tool calls (if any) after stream ends
+            if tool_calls_acc:
+                parsed_calls = []
+                for tc in tool_calls_acc:
+                    try:
+                        args = _json.loads(tc["arguments_str"]) if tc["arguments_str"] else {}
+                    except Exception:
+                        args = {}
+                    parsed_calls.append({"name": tc["name"], "arguments": args})
+                yield {"type": "tool_calls", "tool_calls": parsed_calls}
+
+    except Exception as e:
+        logger.error("stream_chat_with_tools failed: %s", e)
+        raise
+    finally:
+        await client.close()
+
+
 # -- Assistants Threads API (used when AZURE_AI_FOUNDRY_KEY is set) -----------
 
 _THREADS_API_VERSION = "2025-05-01"

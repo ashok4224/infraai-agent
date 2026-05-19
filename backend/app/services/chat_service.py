@@ -257,6 +257,326 @@ async def process_chat(
 
 
 # ---------------------------------------------------------------------------
+# SSE streaming entry point
+# ---------------------------------------------------------------------------
+
+async def stream_process_chat(
+    db: AsyncSession,
+    session_id: UUID | None,
+    message: str,
+    user_id: UUID,
+    user_email: str,
+    context_alert_id: UUID | None = None,
+    approve_tool_plan: bool = False,
+    tool_plan_id: str | None = None,
+    auto_investigate: bool = False,
+):
+    """Async generator that yields SSE event dicts for real-time streaming.
+
+    Event format:  {"event": "<type>", "data": {…}}
+
+    Event types:
+        token       — AI text chunk:            {"text": "…"}
+        tool_plan   — needs approval:           {"plan": {…}, "session_id": "…"}
+        tool_running— tool executing:           {"index": 0, "total": 2, "description": "…", "type": "…", "server_name": "…"}
+        tool_done   — tool finished:            {"index": 0, "success": true, "type": "…", "server_name": "…"}
+        done        — complete:                 {"session_id": "…", "message_id": "…", "metadata_json": {…}}
+        error       — error occurred:           {"message": "…"}
+    """
+    from app.services.chat_tool_registry import execute_chat_tool_call
+    from app.services.azure_foundry_service import stream_chat_with_tools
+
+    ai_mode = "azure_foundry"
+
+    # ── Get or create session ──
+    session: ChatSession | None = None
+    if session_id:
+        result = await db.execute(
+            select(ChatSession).where(ChatSession.id == session_id, ChatSession.user_id == user_id)
+        )
+        session = result.scalar_one_or_none()
+
+    if not session:
+        title = message[:80].strip() or "New Chat"
+        session = ChatSession(user_id=user_id, title=title, ai_mode=ai_mode)
+        db.add(session)
+        await db.flush()
+        await db.refresh(session)
+
+    # ── Save user message ──
+    user_msg = ChatMessage(session_id=session.id, role="user", content=message)
+    db.add(user_msg)
+    await db.flush()
+
+    # ── Build context ──
+    context_parts: list[str] = []
+    try:
+        from app.services.knowledge_retrieval_service import get_context_for_chat
+        rag_context = await get_context_for_chat(message, db)
+        if rag_context:
+            context_parts.append(rag_context)
+    except Exception as e:
+        logger.debug("RAG search skipped in stream_process_chat: %s", e)
+
+    if context_alert_id:
+        alert_result = await db.execute(select(Alert).where(Alert.id == context_alert_id))
+        alert_obj = alert_result.scalar_one_or_none()
+        if alert_obj:
+            context_parts.append(
+                f"[Context: The user is asking about alert '{alert_obj.alertname}' "
+                f"(severity={alert_obj.severity}, status={alert_obj.status}, "
+                f"instance={alert_obj.instance or 'N/A'}, category={alert_obj.alert_category or 'general'}). "
+                f"Summary: {alert_obj.summary or 'N/A'}. Description: {alert_obj.description or 'N/A'}]"
+            )
+            if alert_obj.analysis:
+                context_parts.append(
+                    f"[AI Analysis available: root_cause='{alert_obj.analysis.root_cause or 'N/A'}', "
+                    f"risk_level='{alert_obj.analysis.risk_level or 'N/A'}']"
+                )
+
+    # ── Load history ──
+    history_result = await db.execute(
+        select(ChatMessage)
+        .where(ChatMessage.session_id == session.id, ChatMessage.role != "system")
+        .order_by(ChatMessage.created_at.desc())
+        .limit(20)
+    )
+    history_msgs = list(reversed(history_result.scalars().all()))
+
+    # ── Build AI messages ──
+    # Planning messages: only alert context (no stale RAG) when tools are available
+    alert_ctx = [c for c in context_parts if c.startswith("[Context:")]
+    planning_messages: list[dict] = [{"role": "system", "content": _CHAT_SYSTEM_PROMPT}]
+    if alert_ctx:
+        planning_messages.append({"role": "user", "content": "\n".join(alert_ctx)})
+    for msg in history_msgs:
+        planning_messages.append({"role": msg.role, "content": redact_text(msg.content)})
+
+    # Full messages with RAG context (for knowledge questions with no tools)
+    full_messages: list[dict] = [{"role": "system", "content": _CHAT_SYSTEM_PROMPT}]
+    if context_parts:
+        full_messages.append({"role": "user", "content": "\n".join(context_parts)})
+    for msg in history_msgs:
+        full_messages.append({"role": msg.role, "content": redact_text(msg.content)})
+
+    base_meta: dict = {"provider": "azure_foundry", "agent": "direct", "ai_mode": ai_mode}
+    full_text = ""
+    metadata: dict = dict(base_meta)
+
+    try:
+        from app.services.chat_tool_registry import build_chat_tools
+        tools = await build_chat_tools(db)
+        messages_with_tools = planning_messages if tools else full_messages
+
+        # ── PATH 1: Approve an existing tool plan ──
+        if approve_tool_plan and tool_plan_id:
+            plan_msg = None
+            plan_search = await db.execute(
+                select(ChatMessage)
+                .where(ChatMessage.session_id == session.id, ChatMessage.role == "assistant")
+                .order_by(ChatMessage.created_at.desc())
+                .limit(20)
+            )
+            for pm in plan_search.scalars().all():
+                tp = (pm.metadata_json or {}).get("tool_plan", {})
+                if tp.get("id") == tool_plan_id:
+                    plan_msg = pm
+                    break
+
+            if not plan_msg:
+                err = "Could not find the tool plan. Please try asking your question again."
+                full_text = err
+                yield {"event": "error", "data": {"message": err}}
+            else:
+                tool_calls = (plan_msg.metadata_json or {}).get("tool_plan", {}).get("calls", [])
+                if not tool_calls:
+                    err = "The tool plan has no diagnostics to run."
+                    full_text = err
+                    yield {"event": "error", "data": {"message": err}}
+                else:
+                    results = []
+                    for i, call in enumerate(tool_calls):
+                        yield {"event": "tool_running", "data": {
+                            "index": i, "total": len(tool_calls),
+                            "description": call.get("description", ""),
+                            "type": call.get("type", ""),
+                            "server_name": call.get("server_name", ""),
+                        }}
+                        fn_call = {"name": call.get("_function_name", ""), "arguments": call.get("_arguments", {})}
+                        r = await execute_chat_tool_call(db, fn_call)
+                        results.append({
+                            "type": call.get("type", "unknown"),
+                            "server_name": call.get("server_name", ""),
+                            "description": call.get("description", ""),
+                            "success": r.get("success", False),
+                            "output": r.get("output"),
+                            "error": r.get("error"),
+                            "query": call.get("query"),
+                            "command": call.get("command"),
+                        })
+                        yield {"event": "tool_done", "data": {
+                            "index": i, "server_name": call.get("server_name", ""),
+                            "success": r.get("success", False), "type": call.get("type", ""),
+                        }}
+
+                    user_question = next(
+                        (m.content for m in reversed(history_msgs)
+                         if m.role == "user" and m.content != "(approved tool execution)"),
+                        message,
+                    )
+                    results_text = _format_foundry_tool_results(results)
+                    synthesis_messages = [
+                        {"role": "system", "content": _SYNTHESIS_SYSTEM_PROMPT},
+                        {"role": "user", "content": (
+                            f"Question: {user_question}\n\n"
+                            f"Live diagnostic results:\n{results_text}\n\n"
+                            "Synthesize a clear, actionable answer. Quote specific numbers and values."
+                        )},
+                    ]
+                    async for chunk in stream_chat_with_tools(synthesis_messages, tools=None):
+                        if chunk["type"] == "token":
+                            full_text += chunk["text"]
+                            yield {"event": "token", "data": {"text": chunk["text"]}}
+
+                    clean_text, follow_ups = _extract_follow_ups(full_text)
+                    full_text = clean_text
+                    tools_executed = [{
+                        "type": r["type"], "server_name": r["server_name"],
+                        "success": r["success"], "description": r.get("description", ""),
+                        "output": _normalize_tool_output(r.get("output")),
+                        "query": r.get("query"), "command": r.get("command"), "error": r.get("error"),
+                    } for r in results]
+                    metadata.update({
+                        "tools_executed": tools_executed,
+                        "tool_plan_id": tool_plan_id,
+                        "suggested_follow_ups": follow_ups,
+                    })
+
+        # ── PATH 2: Normal message — stream AI response ──
+        else:
+            async for chunk in stream_chat_with_tools(messages_with_tools, tools=tools if tools else None):
+                if chunk["type"] == "token":
+                    full_text += chunk["text"]
+                    yield {"event": "token", "data": {"text": chunk["text"]}}
+
+                elif chunk["type"] == "tool_calls":
+                    tool_calls_raw = chunk["tool_calls"][:_MAX_TOOL_CALLS]
+                    validated = await _validate_foundry_tool_plan(db, tool_calls_raw)
+
+                    if not validated:
+                        # All tool calls invalid — fallback to plain text
+                        async for fb in stream_chat_with_tools(full_messages, tools=None):
+                            if fb["type"] == "token":
+                                full_text += fb["text"]
+                                yield {"event": "token", "data": {"text": fb["text"]}}
+
+                    elif auto_investigate:
+                        # Execute tools immediately with progress events, then stream synthesis
+                        results = []
+                        for i, call in enumerate(validated):
+                            yield {"event": "tool_running", "data": {
+                                "index": i, "total": len(validated),
+                                "description": call.get("description", ""),
+                                "type": call.get("type", ""),
+                                "server_name": call.get("server_name", ""),
+                            }}
+                            fn_call = {"name": call.get("_function_name", ""), "arguments": call.get("_arguments", {})}
+                            r = await execute_chat_tool_call(db, fn_call)
+                            results.append({
+                                "type": call.get("type", "unknown"),
+                                "server_name": call.get("server_name", ""),
+                                "description": call.get("description", ""),
+                                "success": r.get("success", False),
+                                "output": r.get("output"),
+                                "error": r.get("error"),
+                                "query": call.get("query"),
+                                "command": call.get("command"),
+                            })
+                            yield {"event": "tool_done", "data": {
+                                "index": i, "server_name": call.get("server_name", ""),
+                                "success": r.get("success", False), "type": call.get("type", ""),
+                            }}
+
+                        user_question = next(
+                            (m.content for m in reversed(history_msgs) if m.role == "user"),
+                            message,
+                        )
+                        results_text = _format_foundry_tool_results(results)
+                        synthesis_messages = [
+                            {"role": "system", "content": _SYNTHESIS_SYSTEM_PROMPT},
+                            {"role": "user", "content": (
+                                f"Question: {user_question}\n\n"
+                                f"Live diagnostic results:\n{results_text}\n\n"
+                                "Synthesize a clear, actionable answer. Quote specific numbers and values."
+                            )},
+                        ]
+                        async for s_chunk in stream_chat_with_tools(synthesis_messages, tools=None):
+                            if s_chunk["type"] == "token":
+                                full_text += s_chunk["text"]
+                                yield {"event": "token", "data": {"text": s_chunk["text"]}}
+
+                        clean_text, follow_ups = _extract_follow_ups(full_text)
+                        full_text = clean_text
+                        tools_executed = [{
+                            "type": r["type"], "server_name": r["server_name"],
+                            "success": r["success"], "description": r.get("description", ""),
+                            "output": _normalize_tool_output(r.get("output")),
+                            "query": r.get("query"), "command": r.get("command"), "error": r.get("error"),
+                        } for r in results]
+                        metadata.update({"tools_executed": tools_executed, "suggested_follow_ups": follow_ups})
+
+                    else:
+                        # Needs user approval — emit tool_plan event
+                        explanation = (
+                            "I need to run some diagnostics to answer your question. "
+                            f"Planned {len(validated)} tool call(s)."
+                        )
+                        full_text = explanation
+                        plan_id = str(_uuid.uuid4())
+                        tool_plan = {
+                            "id": plan_id, "explanation": explanation,
+                            "calls": validated, "status": "pending",
+                        }
+                        metadata["tool_plan"] = tool_plan
+                        yield {"event": "tool_plan", "data": {
+                            "plan": tool_plan, "session_id": str(session.id),
+                        }}
+
+    except Exception as e:
+        logger.exception("stream_process_chat error: %s", e)
+        yield {"event": "error", "data": {"message": str(e)}}
+        if not full_text:
+            full_text = f"Error: {e}"
+
+    # ── Save assistant message ──
+    clean_text, follow_ups = _extract_follow_ups(full_text or "(no response)")
+    if clean_text:
+        full_text = clean_text
+    if follow_ups and not metadata.get("suggested_follow_ups"):
+        metadata["suggested_follow_ups"] = follow_ups
+
+    assistant_msg = ChatMessage(
+        session_id=session.id,
+        role="assistant",
+        content=full_text or "(no response)",
+        metadata_json=metadata,
+    )
+    db.add(assistant_msg)
+
+    if session.title in ("New Chat", None, ""):
+        session.title = message[:80].strip() or "Chat"
+
+    await db.flush()
+    await db.refresh(assistant_msg)
+
+    yield {"event": "done", "data": {
+        "session_id": str(session.id),
+        "message_id": str(assistant_msg.id),
+        "metadata_json": metadata,
+    }}
+
+
+# ---------------------------------------------------------------------------
 # Built-in AI — agentic two-step flow
 # ---------------------------------------------------------------------------
 

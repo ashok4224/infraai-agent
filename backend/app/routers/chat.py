@@ -1,9 +1,11 @@
 """Chat router — AskMe conversational interface."""
+import json
 import logging
 from uuid import UUID
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,7 +19,7 @@ from app.schemas.chat import (
     ChatSessionListItem,
 )
 from app.auth.jwt_handler import get_current_user
-from app.services.chat_service import process_chat
+from app.services.chat_service import process_chat, stream_process_chat
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -57,6 +59,56 @@ async def send_message(
         message=assistant_msg.content,
         metadata_json=assistant_msg.metadata_json,
         tool_plan=tool_plan,
+    )
+
+
+@router.post("/stream")
+async def stream_message(
+    payload: ChatRequest,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Stream a chat response using Server-Sent Events (SSE).
+
+    The response is a text/event-stream where each event has the form:
+        event: <type>\\ndata: <json>\\n\\n
+
+    Event types: token, tool_plan, tool_running, tool_done, done, error
+    """
+    content = payload.message.strip()
+    if not content and not payload.approve_tool_plan:
+        raise HTTPException(status_code=400, detail="Message cannot be empty")
+    if len(content) > 10000:
+        raise HTTPException(status_code=400, detail="Message too long (max 10000 characters)")
+
+    async def generate():
+        try:
+            async for event in stream_process_chat(
+                db=db,
+                session_id=payload.session_id,
+                message=content,
+                user_id=user.id,
+                user_email=user.email,
+                context_alert_id=payload.context_alert_id,
+                approve_tool_plan=payload.approve_tool_plan,
+                tool_plan_id=payload.tool_plan_id,
+                auto_investigate=payload.auto_investigate,
+            ):
+                event_name = event.get("event", "message")
+                data = json.dumps(event.get("data", {}))
+                yield f"event: {event_name}\ndata: {data}\n\n"
+        except Exception as e:
+            logger.exception("SSE stream error: %s", e)
+            yield f"event: error\ndata: {json.dumps({'message': str(e)})}\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
     )
 
 
