@@ -1752,8 +1752,20 @@ def _extract_follow_ups(answer: str) -> tuple[str, list[str]]:
     if not match:
         return answer, []
     raw = match.group(1).strip().split("\n")
-    suggestions = [s.strip().lstrip("0123456789.-) ").strip() for s in raw if s.strip()][:3]
-    return answer[: match.start()].rstrip(), suggestions
+    suggestions = []
+    for s in raw:
+        s = s.strip()
+        if not s:
+            continue
+        # Strip leading list markers: numbers, dashes, brackets, parens
+        s = re.sub(r'^[\[\s\d\.\-\)]+', '', s)
+        # Strip trailing bracket
+        s = s.rstrip(']').strip()
+        # Strip backticks around words: `term` → term
+        s = re.sub(r'`([^`]+)`', r'\1', s)
+        if s:
+            suggestions.append(s)
+    return answer[: match.start()].rstrip(), suggestions[:3]
 
 
 async def _auto_execute_and_synthesize(

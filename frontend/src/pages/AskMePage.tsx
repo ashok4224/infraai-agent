@@ -555,7 +555,7 @@ export default function AskMePage() {
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-brand-50 text-brand-700 border border-brand-200 hover:bg-brand-100 transition-colors"
               >
                 <Zap className="h-3 w-3" />
-                {q}
+                {q.replace(/^\[|\]$/g, '').replace(/`([^`]+)`/g, '$1').trim()}
               </button>
             ))}
           </div>
