@@ -161,14 +161,16 @@ async def _run_chat_completion_with_tools(
 
     try:
         async with asyncio.timeout(timeout):
-            response = await client.chat.completions.create(
-                model=model,
-                messages=messages,
-                tools=tools,
-                tool_choice="auto",
-                temperature=0.2,
-                max_tokens=4096,
-            )
+            create_kwargs: dict = {
+                "model": model,
+                "messages": messages,
+                "temperature": 0.2,
+                "max_tokens": 4096,
+            }
+            if tools:  # only pass tool_choice when tools are provided
+                create_kwargs["tools"] = tools
+                create_kwargs["tool_choice"] = "auto"
+            response = await client.chat.completions.create(**create_kwargs)
 
             message = response.choices[0].message
 

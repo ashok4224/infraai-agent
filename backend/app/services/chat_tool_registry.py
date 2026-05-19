@@ -20,6 +20,45 @@ from app.models.server_config import ServerConfig
 logger = logging.getLogger(__name__)
 
 
+def _unwrap_mcp_output(result) -> object:
+    """Unwrap the MCP stdio content envelope.
+
+    MCP servers wrap their responses as:
+        {"content": [{"type": "text", "text": "<json_string>"}]}
+
+    Extract the inner JSON and parse it. If the inner text is itself a
+    JSON-encoded dict/list, return the parsed object. Otherwise return as-is.
+    """
+    import json as _json
+
+    if not isinstance(result, dict):
+        return result
+
+    content = result.get("content")
+    if not isinstance(content, list) or not content:
+        return result
+
+    first = content[0]
+    if not isinstance(first, dict) or first.get("type") != "text":
+        return result
+
+    text = first.get("text", "")
+    if not isinstance(text, str):
+        return result
+
+    try:
+        parsed = _json.loads(text)
+        # Strip ResponseMetadata from AWS responses
+        if isinstance(parsed, dict):
+            parsed.pop("ResponseMetadata", None)
+            # If the inner dict is itself a {"success":..., "data":...} wrapper, unwrap it
+            if "data" in parsed and "success" in parsed:
+                return parsed.get("data", parsed)
+        return parsed
+    except (_json.JSONDecodeError, ValueError):
+        return text
+
+
 def _sanitize_tool_name(name: str) -> str:
     """Convert server name to a valid OpenAI function name.
 
@@ -452,6 +491,8 @@ async def execute_chat_tool_call(db: AsyncSession, call: dict) -> dict:
         try:
             import boto3
             import asyncio as _aio
+            import json as _json
+            from datetime import datetime, date
 
             def _boto3_call():
                 kwargs = {}
@@ -461,7 +502,8 @@ async def execute_chat_tool_call(db: AsyncSession, call: dict) -> dict:
                 method = getattr(client, operation)
                 resp = method(**params)
                 resp.pop("ResponseMetadata", None)
-                return resp
+                # Round-trip through JSON to convert datetime → str and make it serializable
+                return _json.loads(_json.dumps(resp, default=str))
 
             data = await _aio.wait_for(_aio.to_thread(_boto3_call), timeout=30.0)
             return {"success": True, "output": data, "error": None}
@@ -486,7 +528,11 @@ async def execute_chat_tool_call(db: AsyncSession, call: dict) -> dict:
             "operation": operation,
             "params": params,
         })
-        return {"success": mcp_data.success, "output": mcp_data.result, "error": mcp_data.error}
+        # Unwrap MCP content envelope: {"content": [{"type":"text","text":"json_string"}]}
+        output = _unwrap_mcp_output(mcp_data.result)
+        success = mcp_data.success and not (isinstance(output, dict) and output.get("error"))
+        error = mcp_data.error or (output.get("error") if isinstance(output, dict) else None)
+        return {"success": success, "output": output, "error": error}
 
     elif name.startswith("call_azure_"):
         server_name = name[len("call_azure_"):]
@@ -509,7 +555,8 @@ async def execute_chat_tool_call(db: AsyncSession, call: dict) -> dict:
             "operation": operation,
             "params": params,
         })
-        return {"success": mcp_data.success, "output": mcp_data.result, "error": mcp_data.error}
+        output = _unwrap_mcp_output(mcp_data.result)
+        return {"success": mcp_data.success, "output": output, "error": mcp_data.error}
 
     elif name.startswith("call_k8s_"):
         server_name = name[len("call_k8s_"):]
@@ -534,7 +581,8 @@ async def execute_chat_tool_call(db: AsyncSession, call: dict) -> dict:
             "namespace": namespace,
             "extra_args": extra_args,
         })
-        return {"success": mcp_data.success, "output": mcp_data.result, "error": mcp_data.error}
+        output = _unwrap_mcp_output(mcp_data.result)
+        return {"success": mcp_data.success, "output": output, "error": mcp_data.error}
 
     elif name.startswith("query_mongodb_"):
         server_name = name[len("query_mongodb_"):]
