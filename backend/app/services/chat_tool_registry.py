@@ -69,7 +69,7 @@ def _build_postgres_tool_schema(mcp: MCPServerConfig) -> dict:
             "name": f"query_postgres_{safe_name}",
             "description": (
                 f"Run a read-only SQL query on PostgreSQL database '{mcp.name}' "
-                f"({mcp.postgres_host or mcp.host}:{mcp.postgres_port or 5432}). "
+                f"({mcp.oracle_host or 'unknown'}:{mcp.oracle_port or 5432}). "
                 f"Use SELECT, WITH, SHOW, or EXPLAIN only."
             ),
             "parameters": {
@@ -100,7 +100,7 @@ def _build_mysql_tool_schema(mcp: MCPServerConfig) -> dict:
             "name": f"query_mysql_{safe_name}",
             "description": (
                 f"Run a read-only SQL query on MySQL database '{mcp.name}' "
-                f"({mcp.mysql_host or mcp.host}:{mcp.mysql_port or 3306}). "
+                f"({mcp.oracle_host or 'unknown'}:{mcp.oracle_port or 3306}). "
                 f"Use SELECT, SHOW, or EXPLAIN only."
             ),
             "parameters": {

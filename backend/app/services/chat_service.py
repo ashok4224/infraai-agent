@@ -49,12 +49,20 @@ _TOOL_PLAN_SYSTEM_PROMPT = """\
 You are a diagnostic planning assistant. Given a user question and a list of \
 available infrastructure tools, decide whether live diagnostics are needed.
 
-Available tools are Oracle databases (via SQL) and Linux servers (via SSH).
+Available tool types:
+- Oracle databases   → type="sql",       include "query" (SELECT only)
+- PostgreSQL         → type="postgres",   include "query" (SELECT only)
+- MySQL              → type="mysql",      include "query" (SELECT only)
+- Linux SSH servers  → type="ssh",        include "command" (safe read-only commands)
+- AWS cloud          → type="aws",        include "service" (eks/ec2/rds/cloudwatch/s3/lambda), "operation", and optionally "params" dict
+- Kubernetes         → type="kubernetes", include "verb" (get/describe/logs/top), "resource", optionally "namespace" and "extra_args"
 
 RULES:
-- Only plan READ-ONLY operations: SELECT queries, SHOW commands, or safe OS \
-  commands (df, free, top -bn1, uptime, cat /proc/..., ps, vmstat, iostat, etc.).
-- NEVER plan DML (INSERT/UPDATE/DELETE/DROP/ALTER/TRUNCATE) or destructive shell commands.
+- Only plan READ-ONLY operations: SELECT queries, SHOW commands, safe OS \
+  commands (df, free, top -bn1, uptime, ps, vmstat, iostat, etc.), or \
+  AWS Describe/List/Get operations.
+- NEVER plan DML (INSERT/UPDATE/DELETE/DROP/ALTER/TRUNCATE), destructive shell commands, \
+  or mutating AWS operations (create, delete, terminate, modify).
 - Use the exact server_name from the available tools list.
 - Maximum {max_tools} tool calls per plan.
 - If the question is purely knowledge-based (concepts, best practices, how-to), \
@@ -67,7 +75,13 @@ Respond ONLY with valid JSON (no markdown fences):
   "tool_calls": [
     {{
       "type": "sql",
-      "server_name": "<exact MCP server name>",
+      "server_name": "<exact server name>",
+      "query": "<SELECT ...>",
+      "description": "<what this checks>"
+    }},
+    {{
+      "type": "postgres",
+      "server_name": "<exact server name>",
       "query": "<SELECT ...>",
       "description": "<what this checks>"
     }},
@@ -75,6 +89,22 @@ Respond ONLY with valid JSON (no markdown fences):
       "type": "ssh",
       "server_name": "<exact SSH server name>",
       "command": "<safe command>",
+      "description": "<what this checks>"
+    }},
+    {{
+      "type": "aws",
+      "server_name": "<exact AWS server name>",
+      "service": "eks",
+      "operation": "list_clusters",
+      "params": {{}},
+      "description": "<what this checks>"
+    }},
+    {{
+      "type": "kubernetes",
+      "server_name": "<exact K8s server name>",
+      "verb": "get",
+      "resource": "nodes",
+      "namespace": "",
       "description": "<what this checks>"
     }}
   ],
@@ -403,16 +433,47 @@ async def _build_tools_context(db: AsyncSession) -> str:
     """Query active MCP and SSH servers, return a text summary for the AI planner."""
     lines = []
 
-    # MCP (Oracle databases)
     mcp_result = await db.execute(
         select(MCPServerConfig).where(MCPServerConfig.is_active == True)
     )
     mcp_servers = mcp_result.scalars().all()
-    if mcp_servers:
+
+    # Group MCP servers by type
+    oracle_servers = [s for s in mcp_servers if (s.server_type or "").lower() in ("oracle", "oracle_db", "ora", "sqlcl", "")]
+    pg_servers = [s for s in mcp_servers if (s.server_type or "").lower() in ("postgresql", "postgres", "pg")]
+    mysql_servers = [s for s in mcp_servers if (s.server_type or "").lower() in ("mysql", "my")]
+    aws_servers = [s for s in mcp_servers if (s.server_type or "").lower() == "aws"]
+    k8s_servers = [s for s in mcp_servers if (s.server_type or "").lower() in ("kubernetes", "k8s")]
+
+    if oracle_servers:
         lines.append("Available Oracle databases (use type='sql'):")
-        for s in mcp_servers:
+        for s in oracle_servers:
             desc = f" — {s.description}" if getattr(s, "description", None) else ""
             lines.append(f"  - server_name: \"{s.name}\"  ({s.oracle_host}:{s.oracle_port}/{s.oracle_service}){desc}")
+
+    if pg_servers:
+        lines.append("Available PostgreSQL databases (use type='postgres'):")
+        for s in pg_servers:
+            desc = f" — {s.description}" if getattr(s, "description", None) else ""
+            lines.append(f"  - server_name: \"{s.name}\"  ({s.oracle_host}:{s.oracle_port or 5432}/{s.oracle_service}){desc}")
+
+    if mysql_servers:
+        lines.append("Available MySQL databases (use type='mysql'):")
+        for s in mysql_servers:
+            desc = f" — {s.description}" if getattr(s, "description", None) else ""
+            lines.append(f"  - server_name: \"{s.name}\"  ({s.oracle_host}:{s.oracle_port or 3306}/{s.oracle_service}){desc}")
+
+    if aws_servers:
+        lines.append("Available AWS environments (use type='aws', services: eks/ec2/rds/cloudwatch/s3/lambda):")
+        for s in aws_servers:
+            desc = f" — {s.description}" if getattr(s, "description", None) else ""
+            lines.append(f"  - server_name: \"{s.name}\"{desc}")
+
+    if k8s_servers:
+        lines.append("Available Kubernetes clusters (use type='kubernetes', verbs: get/describe/logs/top):")
+        for s in k8s_servers:
+            desc = f" — {s.description}" if getattr(s, "description", None) else ""
+            lines.append(f"  - server_name: \"{s.name}\"{desc}")
 
     # SSH servers
     ssh_result = await db.execute(
@@ -451,6 +512,7 @@ async def _validate_tool_plan(db: AsyncSession, tool_calls: list[dict]) -> list[
       - Remove calls referencing non-existent server names.
       - Reject SQL with critical safety violations (DDL/DML).
       - Reject shell commands matching critical deny patterns.
+      - Reject mutating AWS operations.
       - Enforce query/command length limits (8 KB max).
     Returns only valid calls; logs every rejection.
     """
@@ -461,28 +523,27 @@ async def _validate_tool_plan(db: AsyncSession, tool_calls: list[dict]) -> list[
     mcp_result = await db.execute(
         select(MCPServerConfig).where(MCPServerConfig.is_active == True)
     )
-    mcp_names = {s.name for s in mcp_result.scalars().all()}
+    mcp_map = {s.name: s for s in mcp_result.scalars().all()}
+    mcp_names = set(mcp_map.keys())
 
     ssh_result = await db.execute(
         select(ServerConfig).where(ServerConfig.is_active == True)
     )
     ssh_names = {s.name for s in ssh_result.scalars().all()}
 
+    # AWS read-only operation prefixes
+    _AWS_READONLY_PREFIXES = ("describe_", "list_", "get_", "batch_get", "query", "scan", "search")
+
     valid: list[dict] = []
     for call in tool_calls:
         call_type = call.get("type", "").lower()
         server_name = call.get("server_name", "")
 
-        # Must reference a real server
-        if call_type == "sql" and server_name not in mcp_names:
-            logger.warning("Plan validation: MCP server '%s' not found — removing SQL call", server_name)
-            continue
-        if call_type == "ssh" and server_name not in ssh_names:
-            logger.warning("Plan validation: SSH server '%s' not found — removing SSH call", server_name)
-            continue
-
-        # Safety checks
-        if call_type == "sql":
+        # Validate SQL-like types (oracle, postgres, mysql)
+        if call_type in ("sql", "postgres", "mysql"):
+            if server_name not in mcp_names:
+                logger.warning("Plan validation: MCP server '%s' not found — removing %s call", server_name, call_type)
+                continue
             query = call.get("query", "")
             if len(query) > _MAX_CMD_LEN:
                 logger.warning("Plan validation: SQL query too long (%d chars) — removing", len(query))
@@ -491,7 +552,11 @@ async def _validate_tool_plan(db: AsyncSession, tool_calls: list[dict]) -> list[
             if safety.get("risk") in ("High", "Critical") and not safety.get("allowed"):
                 logger.warning("Plan validation: unsafe SQL rejected — %s", safety.get("reason"))
                 continue
+
         elif call_type == "ssh":
+            if server_name not in ssh_names:
+                logger.warning("Plan validation: SSH server '%s' not found — removing SSH call", server_name)
+                continue
             command = call.get("command", "")
             if len(command) > _MAX_CMD_LEN:
                 logger.warning("Plan validation: command too long (%d chars) — removing", len(command))
@@ -500,6 +565,25 @@ async def _validate_tool_plan(db: AsyncSession, tool_calls: list[dict]) -> list[
             if safety.get("risk") == "Critical":
                 logger.warning("Plan validation: critical command rejected — %s", safety.get("reason"))
                 continue
+
+        elif call_type == "aws":
+            if server_name not in mcp_names:
+                logger.warning("Plan validation: AWS server '%s' not found — removing", server_name)
+                continue
+            operation = call.get("operation", "").lower()
+            if not any(operation.startswith(p) for p in _AWS_READONLY_PREFIXES):
+                logger.warning("Plan validation: non-read-only AWS operation '%s' rejected", operation)
+                continue
+
+        elif call_type == "kubernetes":
+            if server_name not in mcp_names:
+                logger.warning("Plan validation: K8s server '%s' not found — removing", server_name)
+                continue
+            verb = call.get("verb", "").lower()
+            if verb not in ("get", "describe", "logs", "top"):
+                logger.warning("Plan validation: non-read-only kubectl verb '%s' rejected", verb)
+                continue
+
         else:
             logger.warning("Plan validation: unknown tool type '%s' — removing", call_type)
             continue
@@ -520,6 +604,7 @@ async def _execute_tool_calls(db: AsyncSession, tool_calls: list[dict]) -> list[
     from app.services.safety import is_sql_safe, is_shell_command_safe
     from app.services.mcp_service import fetch_oracle_data
     from app.services.ssh_service import run_ssh_command
+    from app.services.tool_registry import _postgres_query_tool, _aws_exec_tool, _k8s_exec_tool
 
     # Preload server configs
     mcp_result = await db.execute(
@@ -555,6 +640,39 @@ async def _execute_tool_calls(db: AsyncSession, tool_calls: list[dict]) -> list[
                 data = await fetch_oracle_data(config, query)
                 return {**base, "success": True, "output": data, "query": query}
 
+            elif call_type == "postgres":
+                query = call.get("query", "")
+                if not query:
+                    return {**base, "success": False, "error": "No query provided", "query": query}
+
+                safety = is_sql_safe(query)
+                if not safety.get("allowed"):
+                    return {**base, "success": False, "error": f"Blocked: {safety.get('reason', 'unsafe')}", "query": query}
+
+                config = mcp_map.get(server_name)
+                if not config:
+                    return {**base, "success": False, "error": f"PostgreSQL server '{server_name}' not found", "query": query}
+
+                data = await _postgres_query_tool(str(config.id), query)
+                return {**base, "success": data.get("success", False), "output": data.get("data"), "error": data.get("error"), "query": query}
+
+            elif call_type == "mysql":
+                from app.services.tool_registry import _mysql_query_tool
+                query = call.get("query", "")
+                if not query:
+                    return {**base, "success": False, "error": "No query provided", "query": query}
+
+                safety = is_sql_safe(query)
+                if not safety.get("allowed"):
+                    return {**base, "success": False, "error": f"Blocked: {safety.get('reason', 'unsafe')}", "query": query}
+
+                config = mcp_map.get(server_name)
+                if not config:
+                    return {**base, "success": False, "error": f"MySQL server '{server_name}' not found", "query": query}
+
+                data = await _mysql_query_tool(str(config.id), query)
+                return {**base, "success": data.get("success", False), "output": data.get("data"), "error": data.get("error"), "query": query}
+
             elif call_type == "ssh":
                 command = call.get("command", "")
                 if not command:
@@ -570,6 +688,33 @@ async def _execute_tool_calls(db: AsyncSession, tool_calls: list[dict]) -> list[
 
                 data = await run_ssh_command(config, command, use_sudo=False, timeout=15)
                 return {**base, "success": data.get("success", False), "output": data.get("output", ""), "error": data.get("error"), "command": command}
+
+            elif call_type == "aws":
+                config = mcp_map.get(server_name)
+                if not config:
+                    return {**base, "success": False, "error": f"AWS server '{server_name}' not found"}
+
+                service = call.get("service", "")
+                operation = call.get("operation", "")
+                params = call.get("params") or {}
+                if not service or not operation:
+                    return {**base, "success": False, "error": "AWS call requires 'service' and 'operation'"}
+
+                data = await _aws_exec_tool(str(config.id), service=service, operation=operation, params=params)
+                return {**base, "success": data.get("success", False), "output": data.get("data"), "error": data.get("error")}
+
+            elif call_type == "kubernetes":
+                config = mcp_map.get(server_name)
+                if not config:
+                    return {**base, "success": False, "error": f"Kubernetes server '{server_name}' not found"}
+
+                verb = call.get("verb", "get")
+                resource = call.get("resource", "pods")
+                namespace = call.get("namespace") or None
+                extra_args = call.get("extra_args") or []
+
+                data = await _k8s_exec_tool(str(config.id), verb=verb, resource=resource, namespace=namespace, extra_args=extra_args)
+                return {**base, "success": data.get("success", False), "output": data.get("data"), "error": data.get("error")}
 
             else:
                 return {**base, "success": False, "error": f"Unknown tool type: {call_type}"}
