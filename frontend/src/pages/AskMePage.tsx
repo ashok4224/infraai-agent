@@ -211,11 +211,29 @@ export default function AskMePage() {
   const [autoTriggered, setAutoTriggered] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
+  // Character-drip animation: tokens go into a buffer; a 60fps interval
+  // drips them 4 chars at a time so the display always looks like smooth typing.
+  const streamBuffer = useRef('');
+  const [streamDisplay, setStreamDisplay] = useState('');
+
   const scrollToBottom = useCallback((behavior: ScrollBehavior = 'smooth') => {
     messagesEndRef.current?.scrollIntoView({ behavior });
   }, []);
 
   useEffect(() => { scrollToBottom(streamingId ? 'auto' : 'smooth'); }, [messages, pendingPlan, scrollToBottom, streamingId]);
+
+  // Drip interval: consume streamBuffer 4 chars at a time at 60fps
+  useEffect(() => {
+    if (!streamingId) return;
+    const timer = setInterval(() => {
+      const buf = streamBuffer.current;
+      if (!buf.length) return;
+      const n = Math.min(4, buf.length);
+      streamBuffer.current = buf.slice(n);
+      setStreamDisplay(prev => prev + buf.slice(0, n));
+    }, 16);
+    return () => clearInterval(timer);
+  }, [streamingId]);
 
   useEffect(() => {
     api.get('/chat/sessions').then(r => {
@@ -293,29 +311,30 @@ export default function AskMePage() {
 
         if (eventType === 'token' && typeof payload.text === 'string') {
           accText += payload.text;
-          setMessages(prev => prev.map(m =>
-            m.id === streamMsgId ? { ...m, content: accText } : m
-          ));
+          streamBuffer.current += payload.text; // drip timer displays it smoothly
           setSending(false); // hide spinner once first token arrives
         } else if (eventType === 'tool_running') {
           const { index, total, description, type: tType, server_name } = payload as Record<string, unknown>;
-          setMessages(prev => prev.map(m =>
-            m.id === streamMsgId
-              ? { ...m, content: `🔍 Diagnostic ${Number(index) + 1}/${total} — ${tType} on ${server_name}: ${description}` }
-              : m
-          ));
+          const progressText = `🔍 Diagnostic ${Number(index) + 1}/${total} — ${tType} on ${server_name}: ${description}`;
+          streamBuffer.current = '';
+          setStreamDisplay(progressText);
         } else if (eventType === 'tool_done') {
           // tool_done events are informational; synthesis tokens follow
         } else if (eventType === 'tool_plan') {
           const plan = payload.plan as ToolPlan;
           const sid = (payload.session_id as string) || '';
           // Remove the placeholder streaming message — plan card replaces it
+          streamBuffer.current = '';
+          setStreamDisplay('');
           setMessages(prev => prev.filter(m => m.id !== streamMsgId));
           onToolPlan(plan, sid);
         } else if (eventType === 'done') {
           const { session_id, message_id, metadata_json } = payload as {
             session_id: string; message_id: string; metadata_json: ChatMessage['metadata_json'];
           };
+          // Flush any remaining buffer so display is complete before streamingId clears
+          setStreamDisplay(prev => prev + streamBuffer.current);
+          streamBuffer.current = '';
           setMessages(prev => prev.map(m =>
             m.id === streamMsgId
               ? { ...m, id: message_id || streamMsgId, content: accText || m.content, metadata_json: metadata_json ?? {} }
@@ -325,6 +344,8 @@ export default function AskMePage() {
           onDone(session_id, message_id, metadata_json);
         } else if (eventType === 'error') {
           const msg = (payload.message as string) || 'Unknown error';
+          streamBuffer.current = '';
+          setStreamDisplay(`Error: ${msg}`);
           setMessages(prev => prev.map(m =>
             m.id === streamMsgId ? { ...m, content: `Error: ${msg}` } : m
           ));
@@ -347,6 +368,8 @@ export default function AskMePage() {
       { id: userMsgId, role: 'user', content: text, created_at: new Date().toISOString() },
       { id: streamMsgId, role: 'assistant', content: '', created_at: new Date().toISOString() },
     ]);
+    streamBuffer.current = '';
+    setStreamDisplay('');
     setStreamingId(streamMsgId);
 
     try {
@@ -402,6 +425,8 @@ export default function AskMePage() {
       ...prev,
       { id: streamMsgId, role: 'assistant', content: '', created_at: new Date().toISOString() },
     ]);
+    streamBuffer.current = '';
+    setStreamDisplay('');
     setStreamingId(streamMsgId);
     setPendingPlan(null);
 
@@ -634,7 +659,10 @@ export default function AskMePage() {
                 >
                   {msg.role === 'assistant' ? (
                     <>
-                      {renderAssistantContent(msg.content, msg)}
+                      {renderAssistantContent(
+                        streamingId === msg.id ? streamDisplay : msg.content,
+                        msg
+                      )}
                       {streamingId === msg.id && (
                         <span className="inline-block w-2 h-4 bg-gray-500 ml-0.5 animate-pulse align-middle" />
                       )}
