@@ -1,5 +1,7 @@
-﻿import { useState, useEffect, useRef, useCallback } from 'react';
+﻿import { useState, useEffect, useRef, useCallback, isValidElement } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import {
   MessageSquare, Send, Plus, Trash2, Loader2, AlertTriangle, Database,
   Terminal, ShieldCheck, XCircle, Copy, Check, CheckCircle,
@@ -168,7 +170,27 @@ function ToolResultPanel({ tool }: { tool: ToolExecuted }) {
   );
 }
 
-// â”€â”€ Main Page â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Code Block with copy button ──────────────────────────────────────────────
+function CodeBlock({ lang, code }: { lang: string; code: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <div className="my-2 rounded-lg overflow-hidden border border-gray-300">
+      <div className="bg-gray-800 px-3 py-1.5 flex items-center justify-between">
+        <span className="text-xs text-gray-400 font-mono">{lang || 'code'}</span>
+        <button
+          onClick={() => { navigator.clipboard.writeText(code); setCopied(true); setTimeout(() => setCopied(false), 2000); }}
+          className="p-1 rounded hover:bg-white/10 text-gray-400 hover:text-white"
+          title="Copy"
+        >
+          {copied ? <Check className="h-3.5 w-3.5 text-green-400" /> : <Copy className="h-3.5 w-3.5" />}
+        </button>
+      </div>
+      <pre className="bg-gray-900 text-green-400 text-xs p-3 overflow-x-auto whitespace-pre-wrap">{code}</pre>
+    </div>
+  );
+}
+
+// ── Main Page ────────────────────────────────────────────────────────────────
 export default function AskMePage() {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
@@ -186,15 +208,14 @@ export default function AskMePage() {
   const [loadingSessions, setLoadingSessions] = useState(true);
   const [pendingPlan, setPendingPlan] = useState<{ planId: string; calls: ToolCallItem[]; explanation: string; sessionId: string } | null>(null);
   const [executing, setExecuting] = useState(false);
-  const [copiedBlock, setCopiedBlock] = useState<string | null>(null);
   const [autoTriggered, setAutoTriggered] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  const scrollToBottom = useCallback(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  const scrollToBottom = useCallback((behavior: ScrollBehavior = 'smooth') => {
+    messagesEndRef.current?.scrollIntoView({ behavior });
   }, []);
 
-  useEffect(() => { scrollToBottom(); }, [messages, pendingPlan, scrollToBottom]);
+  useEffect(() => { scrollToBottom(streamingId ? 'auto' : 'smooth'); }, [messages, pendingPlan, scrollToBottom, streamingId]);
 
   useEffect(() => {
     api.get('/chat/sessions').then(r => {
@@ -430,82 +451,82 @@ export default function AskMePage() {
     if (activeSessionId === id) newSession();
   };
 
-  const handleCopyBlock = (code: string, blockKey: string) => {
-    navigator.clipboard.writeText(code);
-    setCopiedBlock(blockKey);
-    setTimeout(() => setCopiedBlock(null), 2000);
-  };
-
   const renderAssistantContent = (content: string, msg: ChatMessage) => {
-    const nodes: React.ReactNode[] = [];
-
-    // Tool execution panels (replace old pills)
     const toolsExecuted = msg.metadata_json?.tools_executed;
-    if (toolsExecuted && toolsExecuted.length > 0) {
-      nodes.push(
-        <div key="tools" className="mb-3">
-          {toolsExecuted.map((t, i) => <ToolResultPanel key={i} tool={t} />)}
-        </div>
-      );
-    }
-
-    // Parse code blocks
-    const codeBlockRegex = /```(\w*)\n([\s\S]*?)```/g;
-    let lastIndex = 0;
-    let match: RegExpExecArray | null;
-    let blockCount = 0;
-
-    while ((match = codeBlockRegex.exec(content)) !== null) {
-      if (match.index > lastIndex) {
-        nodes.push(<span key={`text-${lastIndex}`}>{content.slice(lastIndex, match.index)}</span>);
-      }
-      const lang = match[1] || 'code';
-      const code = match[2].trim();
-      const blockKey = `${msg.id}-${blockCount}`;
-      nodes.push(
-        <div key={blockKey} className="my-2 rounded-lg overflow-hidden border border-gray-300">
-          <div className="bg-gray-800 px-3 py-1.5 flex items-center justify-between">
-            <span className="text-xs text-gray-400 font-mono">{lang}</span>
-            <button
-              onClick={() => handleCopyBlock(code, blockKey)}
-              className="p-1 rounded hover:bg-white/10 text-gray-400 hover:text-white"
-              title="Copy"
-            >
-              {copiedBlock === blockKey ? <Check className="h-3.5 w-3.5 text-green-400" /> : <Copy className="h-3.5 w-3.5" />}
-            </button>
-          </div>
-          <pre className="bg-gray-900 text-green-400 text-xs p-3 overflow-x-auto">{code}</pre>
-        </div>
-      );
-      blockCount++;
-      lastIndex = match.index + match[0].length;
-    }
-
-    if (lastIndex < content.length) {
-      nodes.push(<span key={`text-${lastIndex}`}>{content.slice(lastIndex)}</span>);
-    }
-
-    // Suggested follow-up buttons
     const followUps = msg.metadata_json?.suggested_follow_ups;
-    if (followUps && followUps.length > 0) {
-      nodes.push(
-        <div key="follow-ups" className="mt-3 pt-3 border-t border-gray-200 flex flex-wrap gap-2">
-          <span className="text-xs text-gray-400 w-full mb-1">Suggested next steps:</span>
-          {followUps.map((q, i) => (
-            <button
-              key={i}
-              onClick={() => setInput(q)}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-brand-50 text-brand-700 border border-brand-200 hover:bg-brand-100 transition-colors"
-            >
-              <Zap className="h-3 w-3" />
-              {q}
-            </button>
-          ))}
-        </div>
-      );
-    }
 
-    return nodes.length > 0 ? nodes : content;
+    return (
+      <div className="space-y-1 text-sm">
+        {toolsExecuted && toolsExecuted.length > 0 && (
+          <div className="mb-3">
+            {toolsExecuted.map((t, i) => <ToolResultPanel key={i} tool={t} />)}
+          </div>
+        )}
+        <ReactMarkdown
+          remarkPlugins={[remarkGfm]}
+          components={{
+            h1: ({ children }) => <h1 className="text-base font-bold text-gray-900 mt-4 mb-1.5 first:mt-0">{children}</h1>,
+            h2: ({ children }) => <h2 className="text-sm font-bold text-gray-900 mt-3 mb-1 first:mt-0">{children}</h2>,
+            h3: ({ children }) => <h3 className="text-sm font-semibold text-gray-800 mt-2 mb-1 first:mt-0 border-b border-gray-100 pb-0.5">{children}</h3>,
+            h4: ({ children }) => <h4 className="text-xs font-semibold text-gray-700 mt-1.5 mb-0.5 uppercase tracking-wide">{children}</h4>,
+            p: ({ children }) => <p className="mb-2 last:mb-0 leading-relaxed text-gray-800">{children}</p>,
+            ul: ({ children }) => <ul className="list-disc pl-5 mb-2 space-y-1">{children}</ul>,
+            ol: ({ children }) => <ol className="list-decimal pl-5 mb-2 space-y-1">{children}</ol>,
+            li: ({ children }) => <li className="leading-relaxed text-gray-800">{children}</li>,
+            strong: ({ children }) => <strong className="font-semibold text-gray-900">{children}</strong>,
+            em: ({ children }) => <em className="italic text-gray-700">{children}</em>,
+            blockquote: ({ children }) => <blockquote className="border-l-4 border-brand-300 pl-3 text-gray-600 italic my-2 bg-brand-50 py-1 rounded-r">{children}</blockquote>,
+            code: ({ children, className }) => {
+              if (!className) {
+                return <code className="bg-gray-100 text-brand-700 px-1.5 py-0.5 rounded text-xs font-mono">{children}</code>;
+              }
+              return <code>{children}</code>;
+            },
+            pre: ({ children }) => {
+              const codeEl = (Array.isArray(children) ? children[0] : children) as React.ReactElement | undefined;
+              if (isValidElement(codeEl)) {
+                const cls = (codeEl.props as { className?: string }).className ?? '';
+                const lang = /language-(\w+)/.exec(cls)?.[1] ?? '';
+                const raw = (codeEl.props as { children?: unknown }).children;
+                const code = (typeof raw === 'string' ? raw : String(raw ?? '')).replace(/\n$/, '');
+                return <CodeBlock lang={lang} code={code} />;
+              }
+              return <pre>{children}</pre>;
+            },
+            hr: () => <hr className="border-gray-200 my-3" />,
+            a: ({ href, children }) => (
+              <a href={href} target="_blank" rel="noopener noreferrer" className="text-brand-600 underline hover:text-brand-800">{children}</a>
+            ),
+            table: ({ children }) => (
+              <div className="overflow-x-auto my-2 rounded-lg border border-gray-200">
+                <table className="w-full text-xs">{children}</table>
+              </div>
+            ),
+            thead: ({ children }) => <thead className="bg-gray-50">{children}</thead>,
+            th: ({ children }) => <th className="px-3 py-2 text-left text-xs font-semibold text-gray-600 border-r border-gray-200 last:border-0">{children}</th>,
+            td: ({ children }) => <td className="px-3 py-1.5 text-gray-700 border-r border-gray-100 last:border-0">{children}</td>,
+            tr: ({ children }) => <tr className="border-t border-gray-100 even:bg-gray-50">{children}</tr>,
+          }}
+        >
+          {content}
+        </ReactMarkdown>
+        {followUps && followUps.length > 0 && (
+          <div className="mt-3 pt-3 border-t border-gray-200 flex flex-wrap gap-2">
+            <span className="text-xs text-gray-400 w-full mb-1">Suggested next steps:</span>
+            {followUps.map((q, i) => (
+              <button
+                key={i}
+                onClick={() => setInput(q)}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-brand-50 text-brand-700 border border-brand-200 hover:bg-brand-100 transition-colors"
+              >
+                <Zap className="h-3 w-3" />
+                {q}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+    );
   };
 
   return (
@@ -595,9 +616,9 @@ export default function AskMePage() {
             messages.map(msg => (
               <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                 <div
-                  className={`max-w-[80%] rounded-2xl px-4 py-3 text-sm whitespace-pre-wrap ${
+                  className={`max-w-[80%] rounded-2xl px-4 py-3 text-sm ${
                     msg.role === 'user'
-                      ? 'bg-brand-500 text-white rounded-br-md'
+                      ? 'bg-brand-500 text-white rounded-br-md whitespace-pre-wrap'
                       : 'bg-gray-100 text-gray-800 rounded-bl-md'
                   }`}
                 >
