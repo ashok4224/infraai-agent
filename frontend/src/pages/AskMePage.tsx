@@ -632,10 +632,10 @@ export default function AskMePage() {
         <div className="flex-1 overflow-y-auto p-6 space-y-4">
           {messages.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-full text-gray-400">
-              <AlertTriangle className="h-12 w-12 mb-3 text-gray-300" />
-              <p className="text-lg font-medium">AskMe — SRE Assistant</p>
-              <p className="text-sm mt-1">Ask about alerts, database issues, infrastructure, or general SRE topics.</p>
-              <p className="text-xs mt-2 text-gray-300">I can run live diagnostics with your approval.</p>
+              <MessageSquare className="h-12 w-12 mb-3 text-brand-300" />
+              <p className="text-lg font-semibold text-gray-600">AI Assistant — SRE Copilot</p>
+              <p className="text-sm mt-1 text-gray-400">Ask about alerts, databases, infrastructure, or run live diagnostics.</p>
+              <p className="text-xs mt-1 text-gray-300">All diagnostic tools require your approval before they run.</p>
               {contextAlertId && contextAlertName && (
                 <button
                   onClick={() => doSendMessage(`Investigate this alert and tell me the root cause and recommended fix: "${decodeURIComponent(contextAlertName)}"`, true)}
@@ -645,6 +645,26 @@ export default function AskMePage() {
                   <Zap className="h-4 w-4" />
                   Auto-Investigate This Alert
                 </button>
+              )}
+              {!contextAlertId && (
+                <div className="mt-6 grid grid-cols-1 gap-2 w-full max-w-md">
+                  {[
+                    'What is the current CPU and memory usage of all nodes?',
+                    'Are there any database connection pool issues right now?',
+                    'Check if all pods in the cluster are healthy',
+                    'What critical alerts have fired in the last 24 hours?',
+                    'Show disk usage across all nodes',
+                  ].map(prompt => (
+                    <button
+                      key={prompt}
+                      onClick={() => doSendMessage(prompt)}
+                      disabled={sending}
+                      className="text-left px-4 py-2.5 rounded-xl border border-gray-200 bg-white hover:bg-brand-50 hover:border-brand-300 text-sm text-gray-600 hover:text-brand-700 transition-colors disabled:opacity-50"
+                    >
+                      {prompt}
+                    </button>
+                  ))}
+                </div>
               )}
             </div>
           ) : (
@@ -748,19 +768,25 @@ export default function AskMePage() {
 
         {/* Input */}
         <div className="border-t border-gray-200 p-4">
+          {pendingPlan && !executing && (
+            <div className="mb-2 flex items-center gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+              <ShieldCheck className="h-3.5 w-3.5 flex-shrink-0 text-amber-600" />
+              <span>Approve or skip the diagnostic plan above before sending a new message.</span>
+            </div>
+          )}
           <div className="flex items-end gap-3">
             <textarea
               value={input}
               onChange={e => setInput(e.target.value)}
               onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); } }}
-              placeholder="Ask something…"
+              placeholder={pendingPlan && !executing ? 'Approve or skip the plan above first…' : 'Ask something…'}
               rows={1}
-              className="flex-1 resize-none rounded-xl border border-gray-300 px-4 py-3 text-sm focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none"
-              disabled={sending || executing}
+              className="flex-1 resize-none rounded-xl border border-gray-300 px-4 py-3 text-sm focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none disabled:bg-gray-50 disabled:text-gray-400 disabled:cursor-not-allowed"
+              disabled={sending || executing || (!!pendingPlan && !executing)}
             />
             <button
               onClick={sendMessage}
-              disabled={!input.trim() || sending || executing}
+              disabled={!input.trim() || sending || executing || (!!pendingPlan && !executing)}
               className="flex h-11 w-11 items-center justify-center rounded-xl bg-brand-500 text-white hover:bg-brand-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
             >
               <Send className="h-4 w-4" />
