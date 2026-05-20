@@ -8,6 +8,7 @@ from sqlalchemy import select, func, delete as sa_delete
 from app.database import get_db
 from app.models.user import User
 from app.models.alert import Alert, AlertAnalysis, AlertNote, _make_fingerprint
+from app.models.command_execution import CommandExecution
 from app.schemas.alert import (
     AlertWebhookPayload,
     AlertResponse,
@@ -282,6 +283,86 @@ async def alert_trend(
             trend_data[date_str]["warning"] += row.count
             
     return list(trend_data.values())
+
+
+# Average manual investigation time saved per alert (minutes) — conservative estimate
+_MANUAL_INVESTIGATION_MINUTES = 45
+
+
+@router.get("/mttr")
+async def alert_mttr(
+    days: int = Query(30, ge=1, le=365),
+    db: AsyncSession = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
+    """Return MTTR and time-saved metrics for the dashboard."""
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+
+    # Resolved alerts with both timestamps in the window
+    resolved_q = await db.execute(
+        select(Alert.received_at, Alert.resolved_at)
+        .where(
+            Alert.status == "resolved",
+            Alert.resolved_at.isnot(None),
+            Alert.received_at >= cutoff,
+        )
+    )
+    resolved_rows = resolved_q.all()
+
+    # Average analysis latency (received_at → last_analyzed_at) for analyzed alerts
+    analyzed_q = await db.execute(
+        select(Alert.received_at, Alert.last_analyzed_at)
+        .where(
+            Alert.analysis_status == "analyzed",
+            Alert.last_analyzed_at.isnot(None),
+            Alert.received_at >= cutoff,
+        )
+    )
+    analyzed_rows = analyzed_q.all()
+
+    # Commands executed in the window
+    executed_q = await db.execute(
+        select(func.count(CommandExecution.id)).where(
+            CommandExecution.status == "executed",
+            CommandExecution.executed_at >= cutoff,
+        )
+    )
+    commands_executed = executed_q.scalar() or 0
+
+    # Compute MTTR in minutes
+    resolution_times = []
+    for row in resolved_rows:
+        if row.received_at and row.resolved_at:
+            delta = (row.resolved_at - row.received_at).total_seconds() / 60
+            if 0 < delta < 60 * 24 * 7:  # ignore outliers > 7 days
+                resolution_times.append(delta)
+
+    mttr_minutes = round(sum(resolution_times) / len(resolution_times), 1) if resolution_times else None
+
+    # Compute avg AI analysis time in seconds
+    analysis_times = []
+    for row in analyzed_rows:
+        if row.received_at and row.last_analyzed_at:
+            delta = (row.last_analyzed_at - row.received_at).total_seconds()
+            if 0 < delta < 3600:  # ignore outliers > 1 hour
+                analysis_times.append(delta)
+
+    avg_analysis_seconds = round(sum(analysis_times) / len(analysis_times), 1) if analysis_times else None
+
+    # Time saved = (manual estimate - actual MTTR) * resolved count
+    total_resolved = len(resolution_times)
+    actual_avg_minutes = mttr_minutes or 0
+    time_saved_minutes = max(0, (_MANUAL_INVESTIGATION_MINUTES - actual_avg_minutes) * total_resolved)
+
+    return {
+        "period_days": days,
+        "total_resolved": total_resolved,
+        "mttr_minutes": mttr_minutes,
+        "avg_analysis_seconds": avg_analysis_seconds,
+        "commands_executed": commands_executed,
+        "time_saved_minutes": round(time_saved_minutes),
+        "manual_baseline_minutes": _MANUAL_INVESTIGATION_MINUTES,
+    }
 
 
 @router.get("/{alert_id}", response_model=AlertResponse)

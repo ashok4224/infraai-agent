@@ -14,14 +14,14 @@ import {
   Cloud,
   ShieldCheck,
 } from 'lucide-react';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import clsx from 'clsx';
 import api from '../api/client';
 
 const navItems = [
   { to: '/', icon: LayoutDashboard, label: 'Dashboard', roles: ['admin', 'operator', 'viewer'] },
   { to: '/alerts', icon: Bell, label: 'Alerts', roles: ['admin', 'operator', 'viewer'] },
-  { to: '/ask-me', icon: MessageSquare, label: 'AskMe', roles: ['admin', 'operator', 'viewer'] },
+  { to: '/ask-me', icon: MessageSquare, label: 'AI Assistant', roles: ['admin', 'operator', 'viewer'] },
   { to: '/db-explorer', icon: Search, label: 'DB Explorer', roles: ['admin', 'operator'] },
   { to: '/command-approvals', icon: ShieldCheck, label: 'Command Approvals', roles: ['admin', 'operator'] },
   { to: '/users', icon: Users, label: 'Users', roles: ['admin'] },
@@ -34,13 +34,25 @@ export default function MainLayout() {
   const navigate = useNavigate();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [aiMode, setAiMode] = useState<'builtin' | 'azure_foundry'>('builtin');
+  const [pendingApprovals, setPendingApprovals] = useState(0);
+  const [firingCritical, setFiringCritical] = useState(0);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const fetchBadgeCounts = useCallback(() => {
+    api.get('/commands/pending/count').then(r => setPendingApprovals(r.data.pending_count ?? 0)).catch(() => {});
+    api.get('/alerts/stats').then(r => setFiringCritical(r.data.critical ?? 0)).catch(() => {});
+  }, []);
 
   useEffect(() => {
     api.get('/settings/').then(r => {
       const modeRow = (r.data as { key: string; value: string }[]).find((s: { key: string }) => s.key === 'ai_mode');
       if (modeRow) setAiMode(modeRow.value as 'builtin' | 'azure_foundry');
     }).catch(() => {});
-  }, []);
+
+    fetchBadgeCounts();
+    pollRef.current = setInterval(fetchBadgeCounts, 30_000);
+    return () => { if (pollRef.current) clearInterval(pollRef.current); };
+  }, [fetchBadgeCounts]);
 
   const toggleMode = async () => {
     const next = aiMode === 'builtin' ? 'azure_foundry' : 'builtin';
@@ -78,25 +90,41 @@ export default function MainLayout() {
           </div>
         </div>
         <nav className="mt-4 flex flex-col gap-1 px-3">
-          {filteredNav.map((item) => (
-            <NavLink
-              key={item.to}
-              to={item.to}
-              end={item.to === '/'}
-              onClick={() => setSidebarOpen(false)}
-              className={({ isActive }) =>
-                clsx(
-                  'flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors',
-                  isActive
-                    ? 'bg-white/15 text-white'
-                    : 'text-brand-100 hover:bg-white/10 hover:text-white'
-                )
-              }
-            >
-              <item.icon className="h-5 w-5" />
-              {item.label}
-            </NavLink>
-          ))}
+          {filteredNav.map((item) => {
+            const isApprovals = item.to === '/command-approvals';
+            const isAlerts = item.to === '/alerts';
+            const approvalBadge = isApprovals && pendingApprovals > 0;
+            const alertsBadge = isAlerts && firingCritical > 0;
+            return (
+              <NavLink
+                key={item.to}
+                to={item.to}
+                end={item.to === '/'}
+                onClick={() => setSidebarOpen(false)}
+                className={({ isActive }) =>
+                  clsx(
+                    'flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors',
+                    isActive
+                      ? 'bg-white/15 text-white'
+                      : 'text-brand-100 hover:bg-white/10 hover:text-white'
+                  )
+                }
+              >
+                <item.icon className="h-5 w-5 shrink-0" />
+                <span className="flex-1">{item.label}</span>
+                {approvalBadge && (
+                  <span className="flex h-5 min-w-[20px] items-center justify-center rounded-full bg-amber-400 px-1.5 text-[10px] font-bold text-amber-900 leading-none">
+                    {pendingApprovals > 99 ? '99+' : pendingApprovals}
+                  </span>
+                )}
+                {alertsBadge && (
+                  <span className="flex h-5 min-w-[20px] items-center justify-center rounded-full bg-red-500 px-1.5 text-[10px] font-bold text-white leading-none animate-pulse">
+                    {firingCritical > 99 ? '99+' : firingCritical}
+                  </span>
+                )}
+              </NavLink>
+            );
+          })}
         </nav>
         <div className="absolute bottom-0 left-0 right-0 p-4 border-t border-brand-400">
           <div className="flex items-center gap-3 mb-3">
