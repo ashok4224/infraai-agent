@@ -5,7 +5,7 @@ import remarkGfm from 'remark-gfm';
 import {
   MessageSquare, Send, Plus, Trash2, Loader2, AlertTriangle, Database,
   Terminal, ShieldCheck, XCircle, Copy, Check, CheckCircle,
-  ChevronDown, ChevronRight, Zap, X,
+  ChevronDown, ChevronRight, Zap, X, Bot, User,
 } from 'lucide-react';
 import api from '../api/client';
 
@@ -592,9 +592,16 @@ export default function AskMePage() {
                   activeSessionId === s.id ? 'bg-brand-50 text-brand-700 font-medium' : 'text-gray-600 hover:bg-gray-50'
                 }`}
               >
-                <div className="flex items-center gap-2 min-w-0">
+                <div className="flex items-center gap-2 min-w-0 flex-1">
                   <MessageSquare className="h-3.5 w-3.5 flex-shrink-0" />
-                  <span className="truncate">{s.title || 'New Chat'}</span>
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-xs font-medium">{s.title || 'New Chat'}</div>
+                    <div className="text-xs text-gray-400 flex items-center gap-1.5 mt-0.5">
+                      <span>{s.message_count > 0 ? `${s.message_count} msg${s.message_count !== 1 ? 's' : ''}` : 'empty'}</span>
+                      <span>·</span>
+                      <span>{(() => { const d = new Date(s.created_at); const diff = Date.now() - d.getTime(); if (diff < 3600000) return `${Math.max(1, Math.floor(diff / 60000))}m ago`; if (diff < 86400000) return `${Math.floor(diff / 3600000)}h ago`; return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }); })()}</span>
+                    </div>
+                  </div>
                 </div>
                 <button
                   onClick={(e) => deleteSession(s.id, e)}
@@ -632,10 +639,15 @@ export default function AskMePage() {
         <div className="flex-1 overflow-y-auto p-6 space-y-4">
           {messages.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-full text-gray-400">
-              <MessageSquare className="h-12 w-12 mb-3 text-brand-300" />
-              <p className="text-lg font-semibold text-gray-600">AI Assistant — SRE Copilot</p>
+              <div className="flex items-center justify-center h-16 w-16 rounded-2xl bg-brand-50 border border-brand-100 mb-4">
+                <Bot className="h-9 w-9 text-brand-500" />
+              </div>
+              <p className="text-lg font-semibold text-gray-700">AI Assistant — SRE Copilot</p>
               <p className="text-sm mt-1 text-gray-400">Ask about alerts, databases, infrastructure, or run live diagnostics.</p>
-              <p className="text-xs mt-1 text-gray-300">All diagnostic tools require your approval before they run.</p>
+              <p className="text-xs mt-1.5 inline-flex items-center gap-1 text-gray-300">
+                <ShieldCheck className="h-3 w-3" />
+                All diagnostic tools require your approval before they run.
+              </p>
               {contextAlertId && contextAlertName && (
                 <button
                   onClick={() => doSendMessage(`Investigate this alert and tell me the root cause and recommended fix: "${decodeURIComponent(contextAlertName)}"`, true)}
@@ -647,21 +659,23 @@ export default function AskMePage() {
                 </button>
               )}
               {!contextAlertId && (
-                <div className="mt-6 grid grid-cols-1 gap-2 w-full max-w-md">
+                <div className="mt-6 grid grid-cols-2 gap-2 w-full max-w-lg">
                   {[
-                    'What is the current CPU and memory usage of all nodes?',
-                    'Are there any database connection pool issues right now?',
-                    'Check if all pods in the cluster are healthy',
-                    'What critical alerts have fired in the last 24 hours?',
-                    'Show disk usage across all nodes',
-                  ].map(prompt => (
+                    { icon: <Database className="h-3.5 w-3.5" />, text: 'Check database connection pool issues' },
+                    { icon: <Terminal className="h-3.5 w-3.5" />, text: 'Show CPU and memory usage of all nodes' },
+                    { icon: <CheckCircle className="h-3.5 w-3.5" />, text: 'Are all pods in the cluster healthy?' },
+                    { icon: <AlertTriangle className="h-3.5 w-3.5" />, text: 'What critical alerts fired in the last 24h?' },
+                    { icon: <Zap className="h-3.5 w-3.5" />, text: 'Show disk usage across all nodes' },
+                    { icon: <ShieldCheck className="h-3.5 w-3.5" />, text: 'Any security anomalies or failed logins?' },
+                  ].map(({ icon, text }) => (
                     <button
-                      key={prompt}
-                      onClick={() => doSendMessage(prompt)}
+                      key={text}
+                      onClick={() => doSendMessage(text)}
                       disabled={sending}
-                      className="text-left px-4 py-2.5 rounded-xl border border-gray-200 bg-white hover:bg-brand-50 hover:border-brand-300 text-sm text-gray-600 hover:text-brand-700 transition-colors disabled:opacity-50"
+                      className="flex items-start gap-2.5 text-left px-4 py-3 rounded-xl border border-gray-200 bg-white hover:bg-brand-50 hover:border-brand-300 text-sm text-gray-600 hover:text-brand-700 transition-colors disabled:opacity-50"
                     >
-                      {prompt}
+                      <span className="mt-0.5 text-brand-400 flex-shrink-0">{icon}</span>
+                      {text}
                     </button>
                   ))}
                 </div>
@@ -669,12 +683,17 @@ export default function AskMePage() {
             </div>
           ) : (
             messages.map(msg => (
-              <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+              <div key={msg.id} className={`flex items-end gap-2.5 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                {msg.role === 'assistant' && (
+                  <div className="flex-shrink-0 flex items-center justify-center h-7 w-7 rounded-full bg-brand-100 border border-brand-200 mb-0.5">
+                    <Bot className="h-3.5 w-3.5 text-brand-600" />
+                  </div>
+                )}
                 <div
-                  className={`max-w-[80%] rounded-2xl px-4 py-3 text-sm ${
+                  className={`group relative max-w-[78%] rounded-2xl px-4 py-3 text-sm ${
                     msg.role === 'user'
-                      ? 'bg-brand-500 text-white rounded-br-md whitespace-pre-wrap'
-                      : 'bg-gray-100 text-gray-800 rounded-bl-md'
+                      ? 'bg-brand-500 text-white rounded-br-sm whitespace-pre-wrap shadow-sm'
+                      : 'bg-slate-50 border border-slate-200 text-gray-800 rounded-bl-sm shadow-sm'
                   }`}
                 >
                   {msg.role === 'assistant' ? (
@@ -684,59 +703,82 @@ export default function AskMePage() {
                         msg
                       )}
                       {streamingId === msg.id && (
-                        <span className="inline-block w-2 h-4 bg-gray-500 ml-0.5 animate-pulse align-middle" />
+                        <span className="inline-block text-gray-400 ml-0.5 animate-pulse align-middle text-base leading-none">▋</span>
+                      )}
+                      {!streamingId && msg.content && (
+                        <button
+                          onClick={() => navigator.clipboard.writeText(msg.content)}
+                          className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-slate-200 text-gray-400 hover:text-gray-600 transition-opacity"
+                          title="Copy response"
+                        >
+                          <Copy className="h-3.5 w-3.5" />
+                        </button>
                       )}
                     </>
                   ) : msg.content}
                 </div>
+                {msg.role === 'user' && (
+                  <div className="flex-shrink-0 flex items-center justify-center h-7 w-7 rounded-full bg-brand-500 border border-brand-600 mb-0.5">
+                    <User className="h-3.5 w-3.5 text-white" />
+                  </div>
+                )}
               </div>
             ))
           )}
 
           {/* Tool Plan Approval Card */}
           {pendingPlan && !executing && (
-            <div className="flex justify-start">
-              <div className="max-w-[80%] rounded-2xl border-2 border-amber-300 bg-amber-50 px-5 py-4">
-                <div className="flex items-center gap-2 mb-3">
-                  <ShieldCheck className="h-5 w-5 text-amber-600" />
-                  <span className="font-semibold text-sm text-amber-800">Diagnostics Plan — Approval Required</span>
+            <div className="flex items-end gap-2.5 justify-start">
+              <div className="flex-shrink-0 flex items-center justify-center h-7 w-7 rounded-full bg-brand-100 border border-brand-200 mb-0.5">
+                <Bot className="h-3.5 w-3.5 text-brand-600" />
+              </div>
+              <div className="max-w-[82%] rounded-2xl rounded-bl-sm border-2 border-amber-300 bg-amber-50 px-5 py-4 shadow-sm">
+                <div className="flex items-start gap-2 mb-2">
+                  <ShieldCheck className="h-5 w-5 text-amber-600 flex-shrink-0 mt-0.5" />
+                  <div>
+                    <span className="font-semibold text-sm text-amber-800">Diagnostics Plan — Approval Required</span>
+                    {pendingPlan.explanation && (
+                      <p className="text-xs text-amber-700 mt-1 leading-relaxed">{pendingPlan.explanation}</p>
+                    )}
+                  </div>
                 </div>
-                <div className="space-y-2 mb-4">
+                <div className="space-y-2 mb-4 mt-3">
                   {pendingPlan.calls.map((call, i) => (
                     <div key={i} className="flex items-start gap-2 bg-white rounded-lg px-3 py-2 border border-amber-200">
-                      {['sql', 'postgres', 'mysql'].includes(call.type) ? (
+                      {['sql', 'postgres', 'mysql', 'oracle'].includes(call.type) ? (
                         <Database className="h-4 w-4 text-blue-500 mt-0.5 flex-shrink-0" />
                       ) : (
                         <Terminal className="h-4 w-4 text-green-600 mt-0.5 flex-shrink-0" />
                       )}
-                      <div className="min-w-0">
+                      <div className="min-w-0 flex-1">
                         <div className="text-xs font-medium text-gray-700">
-                          {call.type.toUpperCase()} on <span className="text-brand-600">{call.server_name}</span>
+                          <span className="bg-gray-100 text-gray-600 rounded px-1 py-0.5 font-mono mr-1">{call.type.toUpperCase()}</span>
+                          on <span className="text-brand-600 font-semibold">{call.server_name}</span>
                         </div>
                         <div className="text-xs text-gray-500 mt-0.5">{call.description}</div>
                         {call.query && (
-                          <pre className="text-xs bg-gray-50 text-gray-600 mt-1 p-1.5 rounded overflow-x-auto">{call.query}</pre>
+                          <pre className="text-xs bg-gray-900 text-green-400 mt-1.5 p-2 rounded overflow-x-auto">{call.query}</pre>
                         )}
                         {call.command && (
-                          <pre className="text-xs bg-gray-50 text-gray-600 mt-1 p-1.5 rounded overflow-x-auto">{call.command}</pre>
+                          <pre className="text-xs bg-gray-900 text-green-400 mt-1.5 p-2 rounded overflow-x-auto">{call.command}</pre>
                         )}
                       </div>
                     </div>
                   ))}
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex flex-col gap-2">
                   <button
                     onClick={handleApprovePlan}
-                    className="px-4 py-1.5 rounded-lg bg-green-600 hover:bg-green-700 text-white text-sm font-medium transition-colors flex items-center gap-1.5"
+                    className="w-full py-2 rounded-xl bg-green-600 hover:bg-green-700 text-white text-sm font-semibold transition-colors flex items-center justify-center gap-2 shadow-sm"
                   >
-                    <ShieldCheck className="h-3.5 w-3.5" />
-                    Approve & Execute
+                    <ShieldCheck className="h-4 w-4" />
+                    Approve & Run Diagnostics
                   </button>
                   <button
                     onClick={handleRejectPlan}
-                    className="px-4 py-1.5 rounded-lg bg-gray-200 hover:bg-gray-300 text-gray-700 text-sm font-medium transition-colors"
+                    className="w-full py-2 rounded-xl bg-white hover:bg-gray-50 border border-gray-200 text-gray-600 text-sm font-medium transition-colors"
                   >
-                    Skip
+                    Skip — answer without live data
                   </button>
                 </div>
               </div>
@@ -792,6 +834,9 @@ export default function AskMePage() {
               <Send className="h-4 w-4" />
             </button>
           </div>
+          <p className="mt-1.5 text-xs text-gray-300 text-center select-none">
+            Enter to send · Shift+Enter for new line
+          </p>
         </div>
       </div>
     </div>
