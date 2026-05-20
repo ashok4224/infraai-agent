@@ -8,12 +8,15 @@ Flow:
 5. On approval, execute the command against the target system
 6. Record result and notify the requester
 """
+import csv
+import io
 import logging
 import time
 from uuid import UUID
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -148,6 +151,118 @@ async def pending_count(
         )
     )
     return {"pending_count": result.scalar()}
+
+
+@router.get("/audit/export")
+async def export_audit_log(
+    start_date: str | None = Query(None, description="Start date YYYY-MM-DD"),
+    end_date: str | None = Query(None, description="End date YYYY-MM-DD"),
+    db: AsyncSession = Depends(get_db),
+    _user: User = Depends(require_operator),
+):
+    """Export the full AI decision + command approval audit trail as CSV.
+
+    Joins every command execution with its originating alert and the AI's
+    root-cause analysis so compliance reviewers get a single downloadable
+    record of: what the AI decided, who approved it, what ran, and whether
+    it succeeded. Requires operator or admin role. Maximum 10 000 rows.
+    """
+    from app.models.alert import Alert, AlertAnalysis
+
+    filters = []
+    if start_date:
+        try:
+            start_dt = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            filters.append(CommandExecution.created_at >= start_dt)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid start_date — use YYYY-MM-DD")
+    if end_date:
+        try:
+            end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(
+                hour=23, minute=59, second=59, tzinfo=timezone.utc
+            )
+            filters.append(CommandExecution.created_at <= end_dt)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid end_date — use YYYY-MM-DD")
+
+    result = await db.execute(
+        select(CommandExecution, Alert, AlertAnalysis)
+        .outerjoin(Alert, CommandExecution.alert_id == Alert.id)
+        .outerjoin(AlertAnalysis, AlertAnalysis.alert_id == Alert.id)
+        .where(*filters)
+        .order_by(CommandExecution.created_at.desc())
+        .limit(10000)
+    )
+    rows = result.all()
+
+    def fmt_dt(dt: datetime | None) -> str:
+        return dt.strftime("%Y-%m-%d %H:%M:%S") if dt else ""
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        "Timestamp (UTC)", "Alert Name", "Alert Severity", "Alert Summary",
+        "AI Root Cause", "AI Confidence", "AI Action Plan",
+        "Risk Level", "Command Type", "Target Server",
+        "Command", "Description",
+        "Requested By", "Status",
+        "Approved By", "Approval Note", "Approved At (UTC)",
+        "Executed At (UTC)", "Execution Success", "Duration (ms)",
+    ])
+
+    for cmd, alert, analysis in rows:
+        exec_success = ""
+        if cmd.execution_result:
+            exec_success = "Yes" if cmd.execution_result.get("success") else "No"
+
+        action_plan_text = ""
+        if analysis and analysis.action_plan:
+            # action_plan is a list — join steps into a readable string
+            steps = analysis.action_plan
+            if steps and isinstance(steps[0], dict):
+                action_plan_text = "; ".join(s.get("action", str(s)) for s in steps[:5])
+            else:
+                action_plan_text = "; ".join(str(s) for s in steps[:5])
+
+        writer.writerow([
+            fmt_dt(cmd.created_at),
+            alert.alertname if alert else "",
+            alert.severity if alert else "",
+            (alert.summary or "")[:200] if alert else "",
+            (analysis.root_cause or "")[:300] if analysis else "",
+            str(round(analysis.confidence_score * 100)) + "%" if analysis and analysis.confidence_score else "",
+            action_plan_text[:400],
+            cmd.risk_level,
+            cmd.target_type.upper(),
+            cmd.target_server_name or "",
+            cmd.command,
+            cmd.description,
+            cmd.requested_by_email,
+            cmd.status,
+            cmd.approved_by_email or "",
+            cmd.approval_note or "",
+            fmt_dt(cmd.approved_at),
+            fmt_dt(cmd.executed_at),
+            exec_success,
+            str(cmd.execution_duration_ms) if cmd.execution_duration_ms is not None else "",
+        ])
+
+    output.seek(0)
+
+    date_suffix = ""
+    if start_date and end_date:
+        date_suffix = f"_{start_date}_to_{end_date}"
+    elif start_date:
+        date_suffix = f"_from_{start_date}"
+    elif end_date:
+        date_suffix = f"_to_{end_date}"
+    filename = f"infraai_audit_log{date_suffix}.csv"
+
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.get("/{cmd_id}", response_model=CommandExecutionResponse)

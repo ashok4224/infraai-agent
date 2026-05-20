@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { ShieldCheck, Check, X, Play, Clock, AlertTriangle, Search, RefreshCw, ChevronLeft, ChevronRight, Filter } from 'lucide-react';
+import { ShieldCheck, Check, X, Play, Clock, AlertTriangle, Search, RefreshCw, ChevronLeft, ChevronRight, Filter, Download } from 'lucide-react';
 import api from '../api/client';
 
 interface CommandExecution {
@@ -51,6 +51,9 @@ export default function CommandApprovalPage() {
   const [approvalNote, setApprovalNote] = useState('');
   const [processing, setProcessing] = useState(false);
   const [detailCmd, setDetailCmd] = useState<CommandExecution | null>(null);
+  const [exportStart, setExportStart] = useState('');
+  const [exportEnd, setExportEnd] = useState('');
+  const [exporting, setExporting] = useState(false);
   const perPage = 15;
 
   const fetchCommands = async () => {
@@ -74,6 +77,26 @@ export default function CommandApprovalPage() {
 
   useEffect(() => { fetchCommands(); }, [page, statusFilter]);
   useEffect(() => { fetchPendingCount(); }, []);
+
+  const handleExport = async () => {
+    setExporting(true);
+    try {
+      const params: Record<string, string> = {};
+      if (exportStart) params.start_date = exportStart;
+      if (exportEnd) params.end_date = exportEnd;
+      const res = await api.get('/commands/audit/export', { params, responseType: 'blob' });
+      const url = URL.createObjectURL(new Blob([res.data], { type: 'text/csv' }));
+      const a = document.createElement('a');
+      a.href = url;
+      const suffix = exportStart && exportEnd ? `_${exportStart}_to_${exportEnd}` : exportStart ? `_from_${exportStart}` : exportEnd ? `_to_${exportEnd}` : '';
+      a.download = `infraai_audit_log${suffix}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch { /* ignore */ }
+    setExporting(false);
+  };
 
   const handleApproval = async () => {
     if (!approvalModal) return;
@@ -108,9 +131,41 @@ export default function CommandApprovalPage() {
           </h2>
           <p className="text-sm text-gray-500 mt-1">Review and approve command execution requests</p>
         </div>
-        <button onClick={() => { fetchCommands(); fetchPendingCount(); }} className="btn-secondary flex items-center gap-2">
-          <RefreshCw className="h-4 w-4" /> Refresh
-        </button>
+        <div className="flex items-center gap-2">
+          <button onClick={() => { fetchCommands(); fetchPendingCount(); }} className="btn-secondary flex items-center gap-2">
+            <RefreshCw className="h-4 w-4" /> Refresh
+          </button>
+        </div>
+      </div>
+
+      {/* Audit Export Bar */}
+      <div className="flex flex-wrap items-center gap-3 mb-4 p-3 bg-blue-50 border border-blue-200 rounded-xl">
+        <Download className="h-4 w-4 text-blue-600 flex-shrink-0" />
+        <span className="text-sm font-medium text-blue-800">Compliance Audit Export</span>
+        <div className="flex items-center gap-2 ml-auto">
+          <label className="text-xs text-blue-700">From</label>
+          <input
+            type="date"
+            value={exportStart}
+            onChange={e => setExportStart(e.target.value)}
+            className="text-xs border border-blue-300 rounded-lg px-2 py-1.5 bg-white focus:outline-none focus:ring-1 focus:ring-blue-400"
+          />
+          <label className="text-xs text-blue-700">To</label>
+          <input
+            type="date"
+            value={exportEnd}
+            onChange={e => setExportEnd(e.target.value)}
+            className="text-xs border border-blue-300 rounded-lg px-2 py-1.5 bg-white focus:outline-none focus:ring-1 focus:ring-blue-400"
+          />
+          <button
+            onClick={handleExport}
+            disabled={exporting}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors"
+          >
+            <Download className="h-3.5 w-3.5" />
+            {exporting ? 'Exporting…' : 'Download CSV'}
+          </button>
+        </div>
       </div>
 
       {/* Filters */}
