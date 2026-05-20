@@ -341,6 +341,9 @@ async def _k8s_exec_tool(config_id: str, verb: str, resource: str, namespace: st
             "replicasets": "replicaset", "rs": "replicaset",
             "daemonsets": "daemonset", "ds": "daemonset",
             "statefulsets": "statefulset", "sts": "statefulset",
+            "configmaps": "configmap", "cm": "configmap",
+            "secrets": "secret",
+            "persistentvolumeclaims": "pvc", "persistentvolumeclaim": "pvc",
         }
         res_type = TYPE_MAP.get(res_type_raw.lower(), res_type_raw.lower().rstrip("s"))
 
@@ -413,6 +416,56 @@ async def _k8s_exec_tool(config_id: str, verb: str, resource: str, namespace: st
                           "ready": i.status.number_ready} for i in data.items]
                 return {"kind": "DaemonSetList", "count": len(items), "items": items}
 
+            elif res_type in ("statefulset",):
+                if namespace:
+                    data = apps_v1.list_namespaced_stateful_set(ns)
+                else:
+                    data = apps_v1.list_stateful_set_for_all_namespaces()
+                items = [{"name": i.metadata.name, "namespace": i.metadata.namespace,
+                          "desired": i.spec.replicas, "ready": i.status.ready_replicas,
+                          "image": ",".join(
+                              c.image for c in (i.spec.template.spec.containers or [])
+                          )} for i in data.items]
+                return {"kind": "StatefulSetList", "count": len(items), "items": items}
+
+            elif res_type == "configmap":
+                if res_name:
+                    cm = v1.read_namespaced_config_map(res_name, ns)
+                    return {"kind": "ConfigMap", "item": {
+                        "name": cm.metadata.name,
+                        "namespace": cm.metadata.namespace,
+                        "keys": list((cm.data or {}).keys()),
+                    }}
+                elif namespace:
+                    data = v1.list_namespaced_config_map(ns)
+                else:
+                    data = v1.list_config_map_for_all_namespaces()
+                items = [{"name": i.metadata.name, "namespace": i.metadata.namespace,
+                          "keys": list((i.data or {}).keys())} for i in data.items]
+                return {"kind": "ConfigMapList", "count": len(items), "items": items}
+
+            elif res_type == "secret":
+                # Return names and types only — never expose secret values
+                if namespace:
+                    data = v1.list_namespaced_secret(ns)
+                else:
+                    data = v1.list_secret_for_all_namespaces()
+                items = [{"name": i.metadata.name, "namespace": i.metadata.namespace,
+                          "type": i.type, "keys": list((i.data or {}).keys())} for i in data.items]
+                return {"kind": "SecretList", "count": len(items), "items": items}
+
+            elif res_type == "pvc":
+                if namespace:
+                    data = v1.list_namespaced_persistent_volume_claim(ns)
+                else:
+                    data = v1.list_persistent_volume_claim_for_all_namespaces()
+                items = [{"name": i.metadata.name, "namespace": i.metadata.namespace,
+                          "status": i.status.phase,
+                          "capacity": (i.status.capacity or {}).get("storage", ""),
+                          "storageClass": i.spec.storage_class_name,
+                          "accessModes": i.spec.access_modes} for i in data.items]
+                return {"kind": "PVCList", "count": len(items), "items": items}
+
             else:
                 raise ValueError(f"Unsupported resource type: {res_type!r}")
 
@@ -464,6 +517,42 @@ async def _k8s_exec_tool(config_id: str, verb: str, resource: str, namespace: st
 
 
 
+def _sanitize_db_value(v):
+    """Convert non-JSON-serializable DB values (timedelta, datetime, Decimal, UUID, bytes)
+    to JSON-safe equivalents.  Called on every cell returned by postgres/mysql queries."""
+    import decimal
+    import uuid
+    from datetime import datetime, date, timedelta
+    if v is None or isinstance(v, (bool, int, float, str)):
+        return v
+    if isinstance(v, timedelta):
+        # Return total seconds as a float — e.g. "00:01:23.456" → 83.456
+        return v.total_seconds()
+    if isinstance(v, (datetime, date)):
+        return v.isoformat()
+    if isinstance(v, decimal.Decimal):
+        return float(v)
+    if isinstance(v, uuid.UUID):
+        return str(v)
+    if isinstance(v, bytes):
+        return v.decode("utf-8", errors="replace")
+    if isinstance(v, (list, tuple)):
+        return [_sanitize_db_value(i) for i in v]
+    if isinstance(v, dict):
+        return {str(k): _sanitize_db_value(val) for k, val in v.items()}
+    try:
+        import json as _j
+        _j.dumps(v)
+        return v
+    except Exception:
+        return str(v)
+
+
+def _sanitize_db_rows(rows: list) -> list:
+    """Apply _sanitize_db_value to every cell of every row."""
+    return [[_sanitize_db_value(cell) for cell in row] for row in rows]
+
+
 # ── PostgreSQL generic executor ──
 async def _postgres_query_tool(config_id: str, sql: str) -> dict:
     """Execute a PostgreSQL query — direct driver first, MCP subprocess as fallback."""
@@ -501,7 +590,8 @@ async def _postgres_query_tool(config_id: str, sql: str) -> dict:
             columns = list(rows[0].keys()) if rows else []
             await conn.close()
             logger.info("PostgreSQL MCP query succeeded via asyncpg on '%s'", config.name)
-            return {"success": True, "data": {"columns": columns, "rows": [list(r.values()) for r in rows]}}
+            raw_rows = [list(r.values()) for r in rows]
+            return {"success": True, "data": {"columns": columns, "rows": _sanitize_db_rows(raw_rows)}}
         except ImportError:
             pass
         except Exception as e:
@@ -518,7 +608,7 @@ async def _postgres_query_tool(config_id: str, sql: str) -> dict:
                 result_rows = cur.fetchall()
                 cur.close()
                 conn.close()
-                return {"columns": cols, "rows": [list(r) for r in result_rows]}
+                return {"columns": cols, "rows": _sanitize_db_rows([list(r) for r in result_rows])}
             data = await asyncio.wait_for(asyncio.to_thread(_run), timeout=20.0)
             logger.info("PostgreSQL MCP query succeeded via psycopg2 on '%s'", config.name)
             return {"success": True, "data": data}
