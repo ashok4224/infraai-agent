@@ -1,0 +1,253 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# OTel Demo values.yaml — tuned for clusters WITHOUT autoscaler
+#
+# Key changes vs. defaults:
+#   1. All resource requests drastically reduced so pods fit on existing nodes
+#   2. Replicas = 1 for every component
+#   3. Kafka/Redis requests minimized
+#   4. Disabled heavy optional components (accountingservice, frauddetectionservice)
+#      to avoid unnecessary CrashLoops where binary deps are missing
+#
+# Usage:
+#   helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
+#   helm upgrade --install my-otel-demo open-telemetry/opentelemetry-demo \
+#     --namespace otel-demo --create-namespace \
+#     -f k8s/otel-demo/values.yaml
+# ──────────────────────────────────────────────────────────────────────────────
+
+default:
+  # All components share these defaults — override per-service below
+  replicas: 1
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+components:
+  # ── Core services ──────────────────────────────────────────────────────────
+  frontend:
+    enabled: true
+    replicas: 1
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 300m
+        memory: 256Mi
+
+  frontendProxy:
+    enabled: true
+    replicas: 1
+    resources:
+      requests:
+        cpu: 30m
+        memory: 32Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
+
+  productCatalogService:
+    enabled: true
+    replicas: 1
+    resources:
+      requests:
+        cpu: 30m
+        memory: 32Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
+
+  cartService:
+    enabled: true
+    replicas: 1
+    resources:
+      requests:
+        cpu: 30m
+        memory: 32Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
+
+  checkoutService:
+    enabled: true
+    replicas: 1
+    resources:
+      requests:
+        cpu: 30m
+        memory: 32Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
+
+  currencyService:
+    enabled: true
+    replicas: 1
+    resources:
+      requests:
+        cpu: 30m
+        memory: 32Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
+
+  emailService:
+    enabled: true
+    replicas: 1
+    resources:
+      requests:
+        cpu: 30m
+        memory: 64Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
+
+  paymentService:
+    enabled: true
+    replicas: 1
+    resources:
+      requests:
+        cpu: 30m
+        memory: 32Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
+
+  recommendationService:
+    enabled: true
+    replicas: 1
+    resources:
+      requests:
+        cpu: 30m
+        memory: 64Mi
+      limits:
+        cpu: 100m
+        memory: 256Mi
+
+  shippingService:
+    enabled: true
+    replicas: 1
+    resources:
+      requests:
+        cpu: 30m
+        memory: 32Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
+
+  adService:
+    enabled: true
+    replicas: 1
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 200m
+        memory: 256Mi
+
+  loadGenerator:
+    enabled: true
+    replicas: 1
+    resources:
+      requests:
+        cpu: 30m
+        memory: 64Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
+
+  # ── Heavy optional — disabled on small clusters ───────────────────────────
+  # These services often CrashLoop without specific infra; disable to keep
+  # the cluster clean and reduce noise alerts.
+  accountingService:
+    enabled: false
+
+  frauddetectionService:
+    enabled: false
+
+  quoteService:
+    enabled: true
+    replicas: 1
+    resources:
+      requests:
+        cpu: 30m
+        memory: 32Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
+
+  # ── Infrastructure components ─────────────────────────────────────────────
+  redis:
+    enabled: true
+    resources:
+      requests:
+        cpu: 30m
+        memory: 32Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
+
+  kafka:
+    enabled: true
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
+  # ── Observability stack ───────────────────────────────────────────────────
+  jaeger:
+    enabled: true
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        cpu: 200m
+        memory: 512Mi
+
+  prometheus:
+    enabled: true
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        cpu: 200m
+        memory: 512Mi
+
+  grafana:
+    enabled: true
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 200m
+        memory: 256Mi
+
+  otelCollector:
+    enabled: true
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 200m
+        memory: 256Mi
+
+# ── OpenTelemetry Collector config ────────────────────────────────────────────
+opentelemetry-collector:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi

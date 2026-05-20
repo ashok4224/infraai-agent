@@ -1,0 +1,122 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# infraai-k8s-mcp-config.yaml
+#
+# Reference configuration to add in InfraAI:
+#   Settings → MCP Servers → Add New Server
+#
+# InfraAI uses its built-in k8s_exec tool (tool_registry.py) to run live
+# Kubernetes API calls: list pods, get events, describe nodes, etc.
+#
+# What the k8s_exec tool does when an alert fires:
+#   1. Lists all pods in the alerted namespace
+#   2. Gets events for Pending / CrashLoopBackOff pods
+#   3. Describes nodes (capacity, pressure conditions)
+#   4. Fetches recent log tail via CoreV1Api.read_namespaced_pod_log()
+#   5. Passes all collected data to the solver AI for mitigation
+# ──────────────────────────────────────────────────────────────────────────────
+
+# ── Option A: EKS via IAM Role (recommended for production) ──────────────────
+# The backend pod / EC2 instance must have an IAM role or IRSA attached
+# with eks:DescribeCluster + eks:GetToken permissions.
+# InfraAI will call `aws eks get-token` internally.
+
+- name: otel-demo-eks                    # Display name in InfraAI UI
+  server_type: kubernetes                # Must be "kubernetes"
+  host: https://<EKS_API_ENDPOINT>      # EKS API server URL (from aws eks describe-cluster)
+  # database field is repurposed for kubeconfig context name or "in-cluster"
+  database: otel-demo                    # Default namespace to operate in
+  # auth_type: iam_eks                   # Use IAM-based token (default when on EKS)
+  extra_config:
+    cluster_name: my-eks-cluster         # EKS cluster name
+    region: ap-south-1                   # AWS region
+    # ca_data: <base64-encoded-CA>       # Optional: paste from `aws eks describe-cluster`
+  is_active: true
+  description: "EKS cluster for OTel demo — otel-demo namespace monitoring"
+
+
+# ── Option B: kubeconfig file (for local / non-EKS clusters) ─────────────────
+# Mount the kubeconfig into the InfraAI backend pod and reference it here.
+# In k8s/base/backend.yaml add:
+#   volumeMounts:
+#     - name: kubeconfig
+#       mountPath: /root/.kube/config
+#       subPath: config
+#   volumes:
+#     - name: kubeconfig
+#       secret:
+#         secretName: infraai-kubeconfig
+
+- name: local-k8s
+  server_type: kubernetes
+  host: https://kubernetes.default.svc   # In-cluster API server
+  database: otel-demo
+  extra_config:
+    kubeconfig_path: /root/.kube/config  # Path inside the backend container
+    context: docker-desktop              # kubectl context name
+  is_active: false
+  description: "Local / minikube / kind cluster"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# What InfraAI's k8s_exec tool collects automatically when a K8s alert fires:
+#
+#   verb=get   resource=pods       namespace=<from alert labels>
+#   verb=get   resource=events     namespace=<from alert labels>
+#   verb=get   resource=nodes
+#   verb=logs  pod=<bad pod name>  namespace=<from alert labels>  tail=100
+#
+# The foundry_analyzer._run_collector_step() picks up the MCP config
+# with server_type="kubernetes" and runs these operations in parallel.
+# Results go into context["collected_data"] and are fed to the solver.
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+# ── IAM Policy: attach to EKS node role or Lambda execution role ──────────────
+# {
+#   "Version": "2012-10-17",
+#   "Statement": [
+#     {
+#       "Sid": "EKSTokenAndDescribe",
+#       "Effect": "Allow",
+#       "Action": [
+#         "eks:DescribeCluster",
+#         "eks:ListClusters"
+#       ],
+#       "Resource": "*"
+#     },
+#     {
+#       "Sid": "CloudWatchLogs",
+#       "Effect": "Allow",
+#       "Action": [
+#         "logs:CreateLogGroup",
+#         "logs:CreateLogStream",
+#         "logs:PutLogEvents",
+#         "logs:DescribeLogGroups",
+#         "logs:DescribeLogStreams",
+#         "logs:PutMetricFilter",
+#         "logs:GetLogEvents"
+#       ],
+#       "Resource": "*"
+#     },
+#     {
+#       "Sid": "CloudWatchMetrics",
+#       "Effect": "Allow",
+#       "Action": [
+#         "cloudwatch:PutMetricData",
+#         "cloudwatch:PutMetricAlarm",
+#         "cloudwatch:GetMetricStatistics"
+#       ],
+#       "Resource": "*"
+#     },
+#     {
+#       "Sid": "SNSPublish",
+#       "Effect": "Allow",
+#       "Action": [
+#         "sns:Publish",
+#         "sns:CreateTopic",
+#         "sns:Subscribe"
+#       ],
+#       "Resource": "*"
+#     }
+#   ]
+# }
