@@ -28,24 +28,72 @@ async def execute_tool(name: str, params: dict) -> dict:
         return {"success": False, "error": f"Unknown tool: {name}"}
     handler, system_type = _tools[name]
 
-    # Safety gate for SQL-like tools
-    if name in ("oracle_sql",):
-        sql = (params or {}).get("sql", "") or ""
-        check = is_sql_safe(sql)
-        if not check.get("allowed"):
-            return {
-                "success": False,
-                "error": "Refused to run unsafe SQL",
-                "requires_approval": check.get("requires_approval", True),
-                "reason": check.get("reason"),
-                "risk": check.get("risk"),
-            }
+    # Safety gate for ALL SQL-like tools (oracle, postgres, mysql)
+    _SQL_TOOLS = {"oracle_sql", "postgres_query", "mysql_query"}
+    if name in _SQL_TOOLS or system_type in ("oracle", "postgres", "mysql", "sql"):
+        sql = (params or {}).get("sql", "") or (params or {}).get("query", "") or ""
+        if sql:
+            check = is_sql_safe(sql)
+            if not check.get("allowed"):
+                return {
+                    "success": False,
+                    "error": "Refused to run unsafe SQL",
+                    "requires_approval": check.get("requires_approval", True),
+                    "reason": check.get("reason"),
+                    "risk": check.get("risk"),
+                }
 
     try:
-        return await handler(**params)
+        result = await handler(**params)
+        return _cap_tool_output(result)
     except Exception as e:
         logger.error("Tool '%s' execution failed: %s", name, e)
         return {"success": False, "error": str(e)}
+
+
+# Maximum characters of tool output forwarded to the LLM. Keeps responses
+# within context-window limits and prevents runaway AWS/K8s JSON payloads.
+_MAX_OUTPUT_CHARS = 12_000
+
+
+def _cap_tool_output(result: dict) -> dict:
+    """Truncate oversized tool output before it reaches the LLM.
+
+    Operates on the 'output', 'data', and 'rows' fields produced by the
+    various tool handlers. Adds a 'truncated' flag when content is cut.
+    """
+    import json as _json
+
+    if not isinstance(result, dict):
+        return result
+
+    for field in ("output", "data"):
+        val = result.get(field)
+        if val is None:
+            continue
+        if isinstance(val, str) and len(val) > _MAX_OUTPUT_CHARS:
+            result[field] = val[:_MAX_OUTPUT_CHARS]
+            result["truncated"] = True
+            logger.debug("Tool output field '%s' truncated to %d chars", field, _MAX_OUTPUT_CHARS)
+        elif not isinstance(val, str):
+            try:
+                serialized = _json.dumps(val)
+                if len(serialized) > _MAX_OUTPUT_CHARS:
+                    result[field] = serialized[:_MAX_OUTPUT_CHARS] + "…(truncated)"
+                    result["truncated"] = True
+                    logger.debug("Tool output field '%s' serialized and truncated", field)
+            except Exception:
+                pass
+
+    # Cap row-level data (SQL result sets)
+    rows = result.get("rows")
+    if isinstance(rows, list) and len(rows) > 500:
+        result["rows"] = rows[:500]
+        result["truncated"] = True
+        result["original_row_count"] = len(rows)
+        logger.debug("Tool output rows truncated from %d to 500", len(rows))
+
+    return result
 
 
 def list_tools() -> list[dict]:

@@ -1685,8 +1685,14 @@ async def _execute_approved_plan_foundry(
 
 
 def _format_foundry_tool_results(results: list[dict]) -> str:
-    """Format tool execution results into a text block for AI synthesis."""
+    """Format tool execution results into a text block for AI synthesis.
+
+    Each tool's output is capped at 4 000 chars to stay within context-window
+    limits. Oversized outputs are truncated with a note so the AI knows data
+    was cut off rather than missing.
+    """
     import json
+    _MAX_PER_TOOL = 4_000
     parts = []
     for i, r in enumerate(results, 1):
         header = f"=== [{i}] {r['type'].upper()} on {r['server_name']} ==="
@@ -1705,6 +1711,9 @@ def _format_foundry_tool_results(results: list[dict]) -> str:
                     output = str(output)
             elif output is None:
                 output = "(no data returned)"
+            # Cap output length before sending to LLM
+            if isinstance(output, str) and len(output) > _MAX_PER_TOOL:
+                output = output[:_MAX_PER_TOOL] + f"\n... (output truncated at {_MAX_PER_TOOL} chars — summarize from available data)"
             parts.append(f"Result:\n{output}")
         else:
             parts.append(f"FAILED: {r.get('error', 'Unknown error')}")
