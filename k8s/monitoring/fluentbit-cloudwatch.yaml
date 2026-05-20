@@ -233,5 +233,5 @@ metadata:
   name: fluent-bit-cluster-info
   namespace: amazon-cloudwatch
 data:
-  cluster.name: YOUR_CLUSTER_NAME   # e.g. my-eks-cluster
-  logs.region:  YOUR_REGION         # e.g. ap-south-1
+  cluster.name: infraai-dev
+  logs.region:  ap-south-1
