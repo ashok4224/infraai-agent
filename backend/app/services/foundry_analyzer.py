@@ -4,6 +4,7 @@ This module is completely independent from the built-in alert_analyzer.py.
 It reads the agent pipeline dynamically from foundry_agent_configs and
 orchestrates: knowledge → researcher → collector → solver → notifier(s).
 """
+import asyncio
 import json
 import logging
 from datetime import datetime, date, timedelta
@@ -121,7 +122,57 @@ async def analyze_alert_with_foundry(alert_id: str, analyst_hint: str | None = N
             # 2. collector runs tools-only (Python executes SQL/SSH) — no extra LLM interpreter call
             has_triage = any(a.role == "triage_master" for a in workflow_pipeline)
 
+            # ── Optimization 3: run knowledge + triage in PARALLEL ──
+            # These two steps are completely independent of each other.
+            # Running them concurrently saves up to ~45 s of wall-clock time.
+            _parallel_roles = {"knowledge", "triage_master"}
+            _parallel_agents = [
+                a for a in workflow_pipeline
+                if a.role in _parallel_roles and a.foundry_agent_name
+            ]
+            _pre_completed: set[str] = set()  # agent_name keys already handled
+
+            if len(_parallel_agents) > 1:
+                async def _run_parallel_step(a):
+                    if a.role == "knowledge":
+                        return a, "knowledge", await _run_knowledge_step(alert, a)
+                    elif a.role == "triage_master":
+                        return a, "triage_master", await _run_triage_step(context, a.foundry_agent_name)
+                    return a, a.role, None
+
+                _par_results = await asyncio.gather(
+                    *[_run_parallel_step(a) for a in _parallel_agents],
+                    return_exceptions=True,
+                )
+                for _r in _par_results:
+                    if isinstance(_r, Exception):
+                        logger.warning("Parallel pre-step failed: %s", _r)
+                        continue
+                    _a, _role, _data = _r
+                    _pre_completed.add(_a.agent_name)
+                    if _role == "knowledge":
+                        context["knowledge_docs"] = _data
+                        pipeline_trace.append({"agent": _a.agent_name, "role": _role, "status": "ok", "note": "parallel"})
+                    elif _role == "triage_master":
+                        context["triage_result"] = _data
+                        try:
+                            _tj = json.loads(_data) if isinstance(_data, str) else _data
+                            if isinstance(_tj, dict):
+                                if _tj.get("technology"):
+                                    context["system_type"] = _normalize_system_type(_tj["technology"], alert)
+                                _extend_specialists_from_triage(
+                                    context, matched_specialists, all_agents,
+                                    _tj.get("required_specialists") or [],
+                                )
+                        except (json.JSONDecodeError, TypeError):
+                            pass
+                        pipeline_trace.append({"agent": _a.agent_name, "role": _role, "status": "ok", "note": "parallel"})
+
             for agent_config in workflow_pipeline:
+                # Skip steps already completed in the parallel pre-run above
+                if agent_config.agent_name in _pre_completed:
+                    continue
+
                 role = agent_config.role
                 agent_id = agent_config.foundry_agent_name
 
@@ -571,6 +622,10 @@ async def _run_collector_step(
     )
     mcps = mcp_result.scalars().all()
 
+    # ── Build all tool tasks upfront, then run in PARALLEL ──
+    # Each entry: (result_key, coroutine, call_record)
+    _tool_tasks: list[tuple[str, object, dict | None]] = []
+
     if mcps:
         # Try to extract SQL from the researcher's diagnostic plan
         diagnostic_plan = context.get("diagnostic_plan", "")
@@ -587,20 +642,13 @@ async def _run_collector_step(
                 continue  # skip unknown MCP types
 
             for qname, sql in queries.items():
-                try:
-                    data = await execute_tool(tool_name, {
-                        "config_id": str(mcp.id),
-                        "sql": sql,
-                    })
-                    collected[f"{mcp.name}_{qname}"] = data
-                    calls.append({
-                        "tool": tool_name,
-                        "server": mcp.name,
-                        "query": qname,
-                        "sql": sql,
-                    })
-                except Exception as e:
-                    collected[f"{mcp.name}_{qname}_error"] = str(e)
+                _key = f"{mcp.name}_{qname}"
+                _call = {"tool": tool_name, "server": mcp.name, "query": qname, "sql": sql}
+                _tool_tasks.append((
+                    _key,
+                    execute_tool(tool_name, {"config_id": str(mcp.id), "sql": sql}),
+                    _call,
+                ))
 
     # ── OS diagnostics via SSH (cross-domain) ──
     from app.models.server_config import ServerConfig
@@ -628,18 +676,14 @@ async def _run_collector_step(
             tool_name = f"{mcp_type}_exec"
             instance_id = alert.instance or ""
 
-            # AWS: fetch EC2 instance + CloudWatch metrics + CloudWatch logs + EKS
             if mcp_type == "aws":
                 aws_operations = [
                     ("ec2_describe", "ec2", "describe_instances", {"Filters": [{"Name": "instance-id", "Values": [instance_id]}]} if instance_id else {}),
                     ("cw_metrics", "cloudwatch", "get_metric_statistics", {
-                        "Namespace": "AWS/EC2",
-                        "MetricName": "CPUUtilization",
+                        "Namespace": "AWS/EC2", "MetricName": "CPUUtilization",
                         "Dimensions": [{"Name": "InstanceId", "Value": instance_id}],
-                        "StartTime": "15 minutes ago",
-                        "EndTime": "now",
-                        "Period": 300,
-                        "Statistics": ["Average", "Maximum"],
+                        "StartTime": "15 minutes ago", "EndTime": "now",
+                        "Period": 300, "Statistics": ["Average", "Maximum"],
                     } if instance_id else {}),
                     ("cw_logs", "logs", "filter_log_events", {
                         "logGroupName": f"/aws/ec2/{instance_id}" if instance_id else "/aws/ec2",
@@ -647,57 +691,35 @@ async def _run_collector_step(
                     } if instance_id else {}),
                 ]
                 for op_name, svc, operation, params in aws_operations:
-                    try:
-                        data = await execute_tool(tool_name, {
-                            "config_id": str(mcp.id),
-                            "service": svc,
-                            "operation": operation,
-                            "params": params,
-                        })
-                        collected[f"{mcp.name}_{op_name}"] = data
-                        calls.append({"tool": tool_name, "server": mcp.name, "aws_op": op_name})
-                    except Exception as e:
-                        collected[f"{mcp.name}_{op_name}_error"] = str(e)
+                    _tool_tasks.append((
+                        f"{mcp.name}_{op_name}",
+                        execute_tool(tool_name, {"config_id": str(mcp.id), "service": svc, "operation": operation, "params": params}),
+                        {"tool": tool_name, "server": mcp.name, "aws_op": op_name},
+                    ))
 
-            # Azure: fetch compute VMs + monitor metrics + activity logs
             elif mcp_type == "azure":
-                az_operations = [
+                for op_name, svc, operation, params in [
                     ("compute_list", "compute", "list_vms", {}),
                     ("monitor_metrics", "monitor", "list_metrics", {}),
                     ("monitor_logs", "monitor", "list_activity_logs", {}),
-                ]
-                for op_name, svc, operation, params in az_operations:
-                    try:
-                        data = await execute_tool(tool_name, {
-                            "config_id": str(mcp.id),
-                            "service": svc,
-                            "operation": operation,
-                            "params": params,
-                        })
-                        collected[f"{mcp.name}_{op_name}"] = data
-                        calls.append({"tool": tool_name, "server": mcp.name, "azure_op": op_name})
-                    except Exception as e:
-                        collected[f"{mcp.name}_{op_name}_error"] = str(e)
+                ]:
+                    _tool_tasks.append((
+                        f"{mcp.name}_{op_name}",
+                        execute_tool(tool_name, {"config_id": str(mcp.id), "service": svc, "operation": operation, "params": params}),
+                        {"tool": tool_name, "server": mcp.name, "azure_op": op_name},
+                    ))
 
-            # Kubernetes: get nodes + pods + events
             elif mcp_type == "kubernetes":
-                k8s_operations = [
+                for op_name, verb, resource, *extra in [
                     ("nodes", "get", "nodes"),
                     ("pods", "get", "pods", "--all-namespaces"),
                     ("events", "get", "events", "--all-namespaces"),
-                ]
-                for op_name, verb, resource, *extra in k8s_operations:
-                    try:
-                        data = await execute_tool(tool_name, {
-                            "config_id": str(mcp.id),
-                            "verb": verb,
-                            "resource": resource,
-                            "extra_args": extra if extra else None,
-                        })
-                        collected[f"{mcp.name}_{op_name}"] = data
-                        calls.append({"tool": tool_name, "server": mcp.name, "k8s_op": op_name})
-                    except Exception as e:
-                        collected[f"{mcp.name}_{op_name}_error"] = str(e)
+                ]:
+                    _tool_tasks.append((
+                        f"{mcp.name}_{op_name}",
+                        execute_tool(tool_name, {"config_id": str(mcp.id), "verb": verb, "resource": resource, "extra_args": extra if extra else None}),
+                        {"tool": tool_name, "server": mcp.name, "k8s_op": op_name},
+                    ))
 
     if all_servers:
         # Extract OS commands from the researcher's plan, or use defaults
@@ -739,17 +761,26 @@ async def _run_collector_step(
         matched_server = _match_ssh_server(all_servers, alert)
         if matched_server:
             for cmd_name, command in os_commands:
-                try:
-                    result = await run_ssh_command(matched_server, command, use_sudo=False, timeout=30)
-                    collected[f"ssh_{cmd_name}"] = result
-                    calls.append({
-                        "tool": "ssh_command",
-                        "server": matched_server.name,
-                        "command_name": cmd_name,
-                        "command": command,
-                    })
-                except Exception as e:
-                    collected[f"ssh_{cmd_name}_error"] = str(e)
+                _tool_tasks.append((
+                    f"ssh_{cmd_name}",
+                    run_ssh_command(matched_server, command, use_sudo=False, timeout=30),
+                    {"tool": "ssh_command", "server": matched_server.name, "command_name": cmd_name, "command": command},
+                ))
+
+    # ── Execute ALL tool tasks in PARALLEL ──
+    if _tool_tasks:
+        _keys = [t[0] for t in _tool_tasks]
+        _coros = [t[1] for t in _tool_tasks]
+        _call_records = [t[2] for t in _tool_tasks]
+
+        _results = await asyncio.gather(*_coros, return_exceptions=True)
+        for _key, _call_rec, _res in zip(_keys, _call_records, _results):
+            if isinstance(_res, Exception):
+                collected[f"{_key}_error"] = str(_res)
+            else:
+                collected[_key] = _res
+                if _call_rec:
+                    calls.append(_call_rec)
 
     return collected, calls
 
@@ -826,33 +857,35 @@ async def _run_solver_step(context: dict, agent_id: str) -> str:
 
 
 async def _run_specialist_steps(context: dict, specialist_agents: list[FoundryAgentConfig]) -> list[dict]:
-    """Run matched technology specialists against the gathered alert context."""
-    results = []
-    for agent in specialist_agents:
+    """Run matched technology specialists in PARALLEL for faster analysis."""
+    if not specialist_agents:
+        return []
+
+    async def _run_one(agent):
         if not agent.foundry_agent_name:
-            results.append({
+            return {
                 "agent_name": agent.agent_name,
                 "system_type": agent.system_type,
                 "status": "skipped",
                 "response": "No Foundry agent name configured",
-            })
-            continue
+            }
         try:
             response = await _run_specialist_step(context, agent)
-            results.append({
+            return {
                 "agent_name": agent.agent_name,
                 "system_type": agent.system_type,
                 "status": "ok",
                 "response": response,
-            })
+            }
         except Exception as exc:
-            results.append({
+            return {
                 "agent_name": agent.agent_name,
                 "system_type": agent.system_type,
                 "status": "error",
                 "response": str(exc),
-            })
-    return results
+            }
+
+    return list(await asyncio.gather(*[_run_one(a) for a in specialist_agents]))
 
 
 async def _run_specialist_step(context: dict, agent_config: FoundryAgentConfig) -> str:
