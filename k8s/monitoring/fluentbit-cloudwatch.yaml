@@ -112,7 +112,6 @@ data:
         region              ${AWS_REGION}
         log_group_name      /eks/otel-demo
         log_stream_prefix   pod/
-        log_stream_template $kubernetes['pod_name']
         auto_create_group   On
         retry_limit         2
 
@@ -123,7 +122,6 @@ data:
         region              ${AWS_REGION}
         log_group_name      /eks/${CLUSTER_NAME}
         log_stream_prefix   pod/
-        log_stream_template $kubernetes['namespace_name']/$kubernetes['pod_name']
         auto_create_group   On
         retry_limit         2
 
